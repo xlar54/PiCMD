@@ -1,3 +1,19 @@
+# Store text files with LF regardless of the machine committing them. Without
+# this it falls back to each contributor's core.autocrlf, which is a per-machine
+# setting - that is how a few files in the tree this was branched from ended up
+# stored with CRLF while everything around them was LF.
+#
+# Later rules below override this one for the paths that must not be touched.
+* text=auto
+
+# cmd.exe mis-parses LF-only batch files - multi-line ( ) blocks and goto
+# targets in particular - so these have to arrive CRLF on every platform.
+*.bat text eol=crlf
+
+# Disk images are binary. Auto-detection would almost certainly get this right,
+# but silently corrupting a preservation image is not worth a heuristic.
+*.d64 -text
+
 # The SD card files in firmware/ are kept for preservation, so store and check
 # them out byte for byte. Without this, line ending conversion rewrites the
 # text ones (config.txt in particular) depending on the machine cloning them.
