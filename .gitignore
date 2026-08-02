@@ -1,0 +1,19 @@
+*.o
+*.a
+*.elf
+*.img
+*.lst
+*.map
+*.swp
+
+# Build output
+target/
+
+# ...but the Raspberry Pi firmware kept for building SD cards is not a build
+# artifact, despite matching the patterns above.
+!firmware/**/*.elf
+!firmware/**/*.img
+
+# The CMD HD boot ROM. Not ours to redistribute - supply your own dump and
+# put it beside these files (and in the root of the SD card).
+cmdhd-bootrom.bin

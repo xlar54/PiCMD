@@ -1,0 +1,4 @@
+# The SD card files in firmware/ are kept for preservation, so store and check
+# them out byte for byte. Without this, line ending conversion rewrites the
+# text ones (config.txt in particular) depending on the machine cloning them.
+firmware/** -text

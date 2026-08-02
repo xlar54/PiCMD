@@ -1,0 +1,162 @@
+// options.txt for Pi-CMD (CMD HD emulator) on a Raspberry Pi 3B/3B+ with
+// hackup's Pi1541io rev 4 interface board and an I2C OLED.
+// Board: https://github.com/hackup/Pi1541io
+//
+// Put this file in the ROOT of the SD card. Uncommented lines are the working
+// configuration for that hardware; everything commented out shows the default.
+// This lists every option the emulator understands - anything not here is not
+// read.
+
+// ---------------------------------------------------------------------------
+// Hardware interface
+// ---------------------------------------------------------------------------
+
+// Pi1541io is split line ("Option B") hardware.
+splitIECLines = 1
+
+// Leave these commented unless your board needs inversion.
+// The default suits a 7406; use invertIECOutputs = 0 for a 7407.
+//invertIECInputs = 1
+//invertIECOutputs = 0
+
+// GPIO used to pull the IEC ATN line low, so the drive can take control of the
+// bus and reprogram whichever drive currently owns device 8 or 9 when you press
+// SWAP. On a Pi1541io the ATN line reaches the Pi through a BSS138
+// bidirectional level shifter, so the pin that reads ATN can drive it too.
+// 0 disables it (the HD then still changes its own device number, it just
+// cannot move another drive out of the way).
+CMDHDAtnOutGPIO = 24
+
+// ---------------------------------------------------------------------------
+// CMD HD
+// ---------------------------------------------------------------------------
+
+// The boot ROM is found automatically if it is named cmdhd-bootrom.bin in the
+// root of the card. Override the name here if you want to.
+//CMDHDRomName = cmdhd-bootrom.bin
+
+// The drive's device number lives inside the image (set it with CMD's
+// HD-TOOLS in configuration mode). Setting this forces a different number by
+// patching the configuration block on the fly. 0 = respect the image.
+//
+// This only works on an image that HAS a configuration block. A blank one has
+// nothing to patch, so the setting is ignored and the drive answers on no
+// device number at all until HDOS is installed. Reach a blank drive with
+// installation mode instead - SWAP 8 + SWAP 9 while tapping RESET - which
+// brings it up on device 30 from the boot ROM.
+//CMDHDDeviceID = 0
+
+// Size in MB of the RAM cache in front of the DHD image.
+//CMDHDCacheMB = 32
+
+// Front panel buttons. The real CMD HD has four: SWAP 8, SWAP 9,
+// WRITE PROTECT and RESET. Button 5 exits emulation (not a CMD HD function).
+// Set any to 0 to disable it.
+//CMDHDButtonSwap8 = 1
+//CMDHDButtonSwap9 = 2
+//CMDHDButtonWP = 3
+//CMDHDButtonReset = 4
+//CMDHDButtonExit = 5
+
+// Mount this image at startup, so the drive comes straight up as a hard drive.
+// The file must be in the /cmd-images folder, and this name must match it
+// EXACTLY, extension included - .dhd and .img are both valid but they are not
+// interchangeable here. A name that does not match is not an error: the drive
+// simply never mounts, you are left in the file browser, and because there is
+// no browse mode on this branch nothing answers the serial bus at all. If the
+// computer sees no drive, check this line against the actual filename first.
+AutoMountImage = hd0.dhd
+
+// ---------------------------------------------------------------------------
+// I2C OLED / LCD
+// ---------------------------------------------------------------------------
+
+// Uncomment the ONE that matches your panel.
+LCDName = ssd1306_128x64
+//LCDName = ssd1306_128x32
+//LCDName = sh1106_128x64
+
+// I2C address in DECIMAL: 60 = 0x3C (most common), 61 = 0x3D
+//i2cLcdAddress = 60
+
+// Which I2C bus. On a Pi1541io rev 4 the solder bridges select this:
+//   1 = GPIO2/GPIO3 (default)     0 = GPIO0/GPIO1
+//i2cBusMaster = 1
+
+// Rotate 180 degrees if the panel is mounted upside down.
+//i2cLcdFlip = 1
+
+// Brightness while active, and while dimmed (0-255).
+//i2cLcdOnContrast = 127
+//i2cLcdDimContrast = 0
+
+// Seconds of inactivity before dimming. 0 never dims.
+//i2cLcdDimTime = 0
+
+// Use the 8 pixel CBM font: 8 text rows instead of 4 (needs ChargenFont set).
+//i2cLcdUseCBMChar = 1
+
+// Show the CMD HD's front panel lamps on the LCD:
+//   POWER ACTIVE / ERROR WR PROT / DRIVE 8 DRIVE 9
+// The panel is monochrome, so a lit lamp is drawn as an inverse video block.
+CMDHDLcdLamps = 1
+
+// Splash image on the LCD at boot: 1541ii, 1541classic, or a PNG on the card.
+//LCDLogoName = 1541ii
+
+// Scan the I2C bus at boot and list the addresses found, on the HDMI screen.
+// Only needed while getting a display working.
+//i2cScan = 1
+
+// ---------------------------------------------------------------------------
+// HDMI screen
+// ---------------------------------------------------------------------------
+
+// Show IEC bus activity along the bottom of the screen.
+GraphIEC = 1
+
+//ScreenWidth = 1024
+//ScreenHeight = 768
+
+// Commodore character ROM used for the CBM font, if you have one.
+//ChargenFont = chargen
+
+// Show PNG icons beside file names in the browser.
+//DisplayPNGIcons = 1
+
+// Show the Pi's CPU temperature. Around 52C is normal; over 65C means
+// something is wrong with your cooling.
+//DisplayTemperature = 1
+
+// Print the parsed options at boot. Useful when a setting seems ignored.
+//ShowOptions = 1
+
+// ---------------------------------------------------------------------------
+// Browser and misc
+// ---------------------------------------------------------------------------
+
+// Go back to the starting folder when the computer resets.
+OnResetChangeToStartingFolder = 1
+
+// Scroll speed for long filenames.
+scrollHighlightRate = 0.07
+
+// Buttons used to navigate the file browser (1-5). These are separate from the
+// CMD HD front panel buttons above, which apply while emulating.
+//buttonEnter = 1
+//buttonUp = 2
+//buttonDown = 3
+//buttonBack = 4
+//buttonInsert = 5
+
+// Let a USB keyboard drive the LCD rather than the HDMI screen.
+//KeyboardBrowseLCDScreen = 1
+
+// Ignore the computer's reset line.
+//IgnoreReset = 1
+
+// Skip the startup delay.
+//QuickBoot = 1
+
+// Accept input over the serial UART.
+//supportUARTInput = 1
