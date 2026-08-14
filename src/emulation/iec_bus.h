@@ -391,6 +391,18 @@ public:
 	}
 #endif
 
+	// Debounce/repeat timing here is measured in real elapsed microseconds
+	// (via ARM_SYSTIMER_CLO), not in call count. INPUT_BUTTON_DEBOUNCE_THRESHOLD
+	// and INPUT_BUTTON_REPEAT_THRESHOLD were written as raw counter increments
+	// on the assumption that this is called about once per microsecond - true
+	// for the CMD HD emulation loop (~1MHz), but the file browser's polling
+	// loop calls this at a much slower and less consistent rate (it also does
+	// directory scanning/screen drawing per iteration), so a normal press
+	// never accumulated anywhere near 20000 *calls* and buttons appeared
+	// completely unresponsive while browsing. Using elapsed time instead
+	// makes the debounce feel the same regardless of which loop is calling
+	// it. See AGENTS.md's "File Browser Button Unresponsive After Emulation"
+	// note for how this was diagnosed.
 	static void UpdateButton(int index, unsigned gplev0)
 	{
 		bool inputcurrent = (gplev0 & ButtonPinFlags[index]) == 0;
@@ -400,15 +412,20 @@ public:
 
 		if (inputcurrent)
 		{
+			if (validInputCount[index] == 0)
+				pressStartTime[index] = read32(ARM_SYSTIMER_CLO);	// start of this press streak
 			validInputCount[index]++;
-			if (validInputCount[index] == INPUT_BUTTON_DEBOUNCE_THRESHOLD)
+
+			u32 heldUs = read32(ARM_SYSTIMER_CLO) - pressStartTime[index];
+
+			if (!InputButton[index] && heldUs >= INPUT_BUTTON_DEBOUNCE_THRESHOLD)
 			{
 				InputButton[index] = true;
 				inputRepeatThreshold[index] = INPUT_BUTTON_DEBOUNCE_THRESHOLD + INPUT_BUTTON_REPEAT_THRESHOLD;
 				inputRepeat[index]++;
 			}
 
-			if (validInputCount[index] == inputRepeatThreshold[index])
+			if (InputButton[index] && heldUs >= inputRepeatThreshold[index])
 			{
 				inputRepeat[index]++;
 				inputRepeatThreshold[index] += INPUT_BUTTON_REPEAT_THRESHOLD / inputRepeat[index];
@@ -692,6 +709,7 @@ private:
 	static u32 inputRepeatThreshold[5];
 	static u32 inputRepeat[5];
 	static u32 inputRepeatPrev[5];
+	static u32 pressStartTime[5];
 
 };
 #endif

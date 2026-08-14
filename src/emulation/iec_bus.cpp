@@ -69,6 +69,7 @@ u32 IEC_Bus::validInputCount[5] = { 0 };
 u32 IEC_Bus::inputRepeatThreshold[5];
 u32 IEC_Bus::inputRepeat[5] = { 0 };
 u32 IEC_Bus::inputRepeatPrev[5] = { 0 };
+u32 IEC_Bus::pressStartTime[5] = { 0 };
 
 
 u32 IEC_Bus::emulationModeCheckButtonIndex = 0;

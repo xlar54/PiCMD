@@ -1104,6 +1104,16 @@ void emulator()
 
 			while (emulating == IEC_COMMANDS)
 			{
+				// Refresh button/GPIO state every iteration. Without this the
+				// file browser's buttons only reflect whatever
+				// WaitForClearButtons() last polled right before this loop
+				// was entered, and never update again - so after returning
+				// from CMD HD emulation (or any other exit path), the disk
+				// selection screen looks normal but nothing responds to
+				// button presses. See AGENTS.md's "File Browser Button
+				// Unresponsive After Emulation" note.
+				IEC_Bus::ReadBrowseMode();
+
 				fileBrowser->Update();
 				if (fileBrowser->SelectionsMade())
 					emulating = BeginEmulating(fileBrowser, fileBrowser->LastSelectionName());
