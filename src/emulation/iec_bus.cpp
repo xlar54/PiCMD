@@ -304,6 +304,11 @@ void IEC_Bus::PortB_OnPortOut(void* pUserData, unsigned char status)
 	//}
 
 	//if (AtnaDataSetToOutOld ^ AtnaDataSetToOut)
+
+	// Event-driven output: push DATA/CLOCK to the physical pins immediately
+	// instead of waiting for the next periodic RefreshOutsCMDHD(). See
+	// RefreshIECOutsNow()'s comment in iec_bus.h.
+	RefreshIECOutsNow();
 }
 
 void IEC_Bus::Reset(void)

@@ -657,7 +657,10 @@ u8 PiCMDHD::Read(u16 address)
 		{
 		case 0x0: // 0x80xx U10
 		case 0x1: // 0x81xx U10
-			return via10.Read(address & 15);
+			reg = address & 15;
+			if (reg == VIA_REG_ORB)
+				IEC_Bus::SampleIECInsNow();	// event-driven DATA/CLOCK sample, see iec_bus.h
+			return via10.Read(reg);
 		case 0x4: // 0x84xx U9
 		case 0x5: // 0x85xx U9
 			reg = address & 15;
