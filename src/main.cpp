@@ -412,9 +412,9 @@ static void UpdateLCDLamps(void)
 	if (rows == 0)
 		return;
 
-	bool on[6];
-	const char* wide[6];
-	const char* narrow[6];
+	bool on[7];
+	const char* wide[7];
+	const char* narrow[7];
 
 	on[0] = true;								// POWER - the drive is running
 	on[1] = piCMDHD.IsActivityLEDOn();
@@ -422,6 +422,7 @@ static void UpdateLCDLamps(void)
 	on[3] = piCMDHD.IsWriteProtectLEDOn();
 	on[4] = piCMDHD.IsSwap8LEDOn();
 	on[5] = piCMDHD.IsSwap9LEDOn();
+	on[6] = piCMDHD.IsGeosLEDOn();
 
 	wide[0] = "POWER";   narrow[0] = "PWR";
 	wide[1] = "ACTIVE";  narrow[1] = "ACT";
@@ -429,6 +430,7 @@ static void UpdateLCDLamps(void)
 	wide[3] = "WR PROT"; narrow[3] = "WP";
 	wide[4] = "DRIVE 8"; narrow[4] = "D8";
 	wide[5] = "DRIVE 9"; narrow[5] = "D9";
+	wide[6] = "GEOS";    narrow[6] = "GEOS";
 
 	core0RefreshingScreen.Acquire();
 	IEC_Bus::WaitMicroSeconds(100);
@@ -436,23 +438,39 @@ static void UpdateLCDLamps(void)
 	u32 lampRows;
 	if (rows >= 4)
 	{
-		// 16 characters across, so two lamps per row in eight column fields
+		// 16 characters across. Use two wide fields on the first rows, then a
+		// compact final row so GEOS still fits on 128x64 panels.
 		lampRows = 3;
-		for (int i = 0; i < 6; ++i)
+		for (int i = 0; i < 4; ++i)
 		{
 			snprintf(tempBuffer, tempBufferSize, "%-8s", wide[i]);
 			screenLCD->PrintText(false, (i & 1) ? 8 * 8 : 0, (i >> 1) * fontHeight,
 				tempBuffer, 0, on[i] ? RGBA(0xff, 0xff, 0xff, 0xff) : 0);
 		}
+
+		for (int i = 4; i < 7; ++i)
+		{
+			snprintf(tempBuffer, tempBufferSize, "%-4s", narrow[i]);
+			screenLCD->PrintText(false, (i - 4) * 4 * 8, 2 * fontHeight,
+				tempBuffer, 0, on[i] ? RGBA(0xff, 0xff, 0xff, 0xff) : 0);
+		}
 	}
 	else
 	{
-		// Only room for a couple of rows: four short tags each
+		// Only room for a couple of rows: four short tags each, with GEOS on
+		// the second row so 128x32 panels can still show it.
 		lampRows = 2;
-		for (int i = 0; i < 6; ++i)
+		for (int i = 0; i < 4; ++i)
 		{
 			snprintf(tempBuffer, tempBufferSize, "%-4s", narrow[i]);
-			screenLCD->PrintText(false, (i % 4) * 4 * 8, (i / 4) * fontHeight,
+			screenLCD->PrintText(false, i * 4 * 8, 0,
+				tempBuffer, 0, on[i] ? RGBA(0xff, 0xff, 0xff, 0xff) : 0);
+		}
+
+		for (int i = 4; i < 7; ++i)
+		{
+			snprintf(tempBuffer, tempBufferSize, "%-4s", narrow[i]);
+			screenLCD->PrintText(false, (i - 4) * 4 * 8, fontHeight,
 				tempBuffer, 0, on[i] ? RGBA(0xff, 0xff, 0xff, 0xff) : 0);
 		}
 	}
