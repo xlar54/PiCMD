@@ -380,9 +380,17 @@ ROM is not there and is gitignored - it is not ours to redistribute - and
 - Supported Pi models: 3B/3B+ recommended (RASPPI=3 build). The 2MHz 65C02
   plus two VIAs is more work per microsecond than a 1MHz 1541; Pi Zero
   builds compile but are not expected to keep up.
-- DHD images are streamed from the SD card through a write-through cache
+- DHD images are streamed from the SD card through a RAM cache
   (`CMDHDCacheMB`). A cache miss stalls the emulated CPU for the duration
   of the SD access, exactly as if the SCSI drive were slow to respond.
+- That cache is **write behind**. A write is acknowledged to the computer as
+  soon as it reaches RAM and only reaches the card when the serial bus goes
+  quiet, when the drive is reset, or on eject - going to the card mid-command
+  freezes the emulated CPU far longer than the bus will wait. Cutting the
+  power, or pulling the card, with writes still in flight loses them. If a
+  flush does fail, the data stays cached for a retry and the drive reports
+  CHECK CONDITION / MEDIUM ERROR on its next command rather than pretending
+  the write landed.
 - Fast serial (C128 burst) is wired through U10's shift register at the bit
   level and SRQ is sampled/driven as the 1581 build did. C64 use (including
   JiffyDOS, which HDOS implements in software) is unaffected.

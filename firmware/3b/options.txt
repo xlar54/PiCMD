@@ -47,6 +47,21 @@ CMDHDAtnOutGPIO = 24
 //CMDHDDeviceID = 0
 
 // Size in MB of the RAM cache in front of the DHD image.
+//
+// The cache is write behind, not write through: a write is acknowledged to the
+// computer as soon as it reaches RAM, and only reaches the card when the
+// serial bus goes quiet or the drive is reset. It has to work that way - going
+// to the card mid-command freezes the emulated CPU for tens of milliseconds
+// and the bus gives up long before that.
+//
+// So the cache is also a window in which acknowledged writes exist only in the
+// Pi's RAM. Pulling the power (or the card) inside that window loses them, and
+// the volume is then partly stale rather than obviously broken. Reset now
+// flushes, so reset-to-reboot is safe; yanking power is not.
+//
+// A smaller cache narrows the window and flushes more often, at the cost of
+// more trips to the card. Try 4 if you are doing a lot of writing - installing
+// GEOS or Wheels onto a partition, say - and want less in flight.
 //CMDHDCacheMB = 32
 
 // Front panel buttons. The real CMD HD has four: SWAP 8, SWAP 9,

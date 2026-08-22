@@ -44,7 +44,7 @@ public:
 	static const u32 CACHE_CHUNK_SIZE = 1 << CACHE_CHUNK_SHIFT;
 	static const u32 SECTORS_PER_CHUNK = CACHE_CHUNK_SIZE / SECTOR_SIZE;
 
-	ScsiImage() : attached(false), sizeInSectors(0), readOnly(false) {}
+	ScsiImage() : attached(false), sizeInSectors(0), readOnly(false), needSync(false), writeErrorPending(false) {}
 
 	bool Attach(const char* filename, bool readOnly);
 	void Detach();
@@ -71,15 +71,30 @@ public:
 	// left alone.
 	static u32 AccessCounter() { return accessCounter; }
 
-	// Flush every attached image. Only call this when the serial bus is quiet:
-	// it goes to the card, which freezes the emulated CPU, and a frozen CPU
-	// cannot answer ATN.
-	static void FlushIdle();
+	// Flush every attached image. Returns the number of images that could not
+	// be written. Only call this when the serial bus is quiet: it goes to the
+	// card, which freezes the emulated CPU, and a frozen CPU cannot answer
+	// ATN. Reset is also a safe moment - the drive is restarting anyway, and
+	// losing acknowledged writes there is worse than a pause.
+	static int FlushAll();
 
 	// Flush dirty chunks and FatFS metadata. Does nothing unless forced -
 	// going to the card at an arbitrary moment is what broke the bus. Detach
-	// forces it; everything else waits for FlushIdle.
-	void Sync(bool force = false);
+	// and reset force it; everything else waits for an idle window.
+	// Returns 0 on success.
+	int Sync(bool force = false);
+
+	// Writes are acknowledged to the host as soon as they reach the cache, so
+	// by the time a flush fails the computer has long since been told the
+	// write succeeded. There is no way to un-acknowledge it, so instead the
+	// data stays dirty for a later retry and this latches - the next command
+	// for the image reports CHECK CONDITION / MEDIUM ERROR so the failure
+	// surfaces as a drive error rather than as silent corruption.
+	bool HasWriteError() const { return writeErrorPending; }
+	bool TakeWriteError() { bool e = writeErrorPending; writeErrorPending = false; return e; }
+
+	// Total flush failures since boot, for the display and for bug reports.
+	static u32 WriteErrorCount() { return writeErrors; }
 
 	// The (global) cache used by all images.
 	static void InitCache(u32 sizeInBytes);
@@ -90,8 +105,10 @@ private:
 	u32 sizeInSectors;
 	bool readOnly;
 	bool needSync;
+	bool writeErrorPending;
 	static u32 worstStallMicros;
 	static u32 accessCounter;
+	static u32 writeErrors;
 
 	char name[256];
 
@@ -112,8 +129,10 @@ private:
 
 	// Push one dirty chunk out to the card. Used when a slot is reused for
 	// something else, and by Sync.
+	// Both return 0 on success. A chunk that fails keeps its dirty bits so the
+	// next flush tries again rather than dropping the data on the floor.
 	int FlushChunk(CacheSlot& slot);
-	void FlushAllDirty();
+	int FlushAllDirty();
 	static void NoteStall(u32 startMicros);
 
 	// A chunk being evicted can belong to a different disk, so we need to get
@@ -147,6 +166,7 @@ private:
 #define SCSI_STATUS_CHECKCONDITION           0x01
 
 #define SCSI_SENSEKEY_NOSENSE        0x00
+#define SCSI_SENSEKEY_MEDIUMERROR    0x03
 #define SCSI_SENSEKEY_ILLEGALREQUEST 0x05
 
 #define SCSI_SASC_LOGICALBLOCKADDRESSOUTOFRANGE 0x21
