@@ -291,7 +291,7 @@ following the write protect state, and the lamps being used as a binary digit
 display in FPPS mode.
 
 On a 128x32 display, or any panel with room for fewer than four text rows,
-the layout falls back to short tags (`PWR ACT ERR WP` / `D8 D9`) and the
+the layout falls back to short tags (`PWR ACT ERR WP` / `D8 D9 GEOS`) and the
 track line is dropped.
 
 Set `CMDHDLcdLamps = 0` to leave the LCD showing only what Pi1541 showed.
