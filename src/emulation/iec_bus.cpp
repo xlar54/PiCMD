@@ -23,8 +23,8 @@
 
 int IEC_Bus::buttonCount = sizeof(ButtonPinFlags) / sizeof(unsigned);
 
-u32 IEC_Bus::oldClears = 0;
-u32 IEC_Bus::oldSets = 0;
+u32 IEC_Bus::oldReleaseBits = 0;
+u32 IEC_Bus::oldAssertBits = 0;
 u32 IEC_Bus::PIGPIO_MASK_IN_ATN = 1 << PIGPIO_ATN;
 u32 IEC_Bus::PIGPIO_MASK_IN_DATA = 1 << PIGPIO_DATA;
 u32 IEC_Bus::PIGPIO_MASK_IN_CLOCK = 1 << PIGPIO_CLOCK;

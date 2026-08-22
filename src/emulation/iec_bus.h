@@ -456,7 +456,8 @@ public:
 	// emulated cycle instead of waiting up to ~1us for the next periodic
 	// refresh. That ~1us of slack was enough to occasionally misalign
 	// GEOS's 2-bit-per-sample turbo protocol, whose symbol gaps run only
-	// ~8-11us (see AGENTS.md's GEOS/CMD-HD debug log).
+	// ~8-11us - so a whole microsecond of latency is a large fraction of one
+	// symbol, and the receiver can sample the wrong half of a bit pair.
 	static inline void RefreshIECOutsNow(void)
 	{
 		if (!splitIECLines)
@@ -468,24 +469,30 @@ public:
 
 			unsigned nValue = (myOutsGPFSEL1 & PI_OUTPUT_MASK_GPFSEL1) | outputs;
 			write32(ARM_GPIO_GPFSEL1, nValue);
+
+			// A single GPFSEL1 write changes both lines at once, so the
+			// ordering problem handled below cannot arise here. ATN out still
+			// has to be refreshed though - it lives in a different GPFSEL
+			// register and is driven the same way on split and non split
+			// wiring alike.
+			RefreshAtnOut();
 			return;
 		}
 
-		unsigned set = 0;
-		unsigned clear = 0;
+		// Kept in bus terms - asserted means "pulling the line low" - for as
+		// long as possible. Which physical level that is depends on the
+		// buffer: with an inverting one (7406, invertIECOutputs = 1) asserting
+		// drives the pin high; with a non inverting one (7407) it drives it
+		// low. Deciding the write order below in bus terms rather than pin
+		// terms is what keeps this correct for both.
+		unsigned assertBits = 0;
+		unsigned releaseBits = 0;
 
-		if (AtnaDataSetToOut || DataSetToOut) set |= 1 << PIGPIO_OUT_DATA;
-		else clear |= 1 << PIGPIO_OUT_DATA;
+		if (AtnaDataSetToOut || DataSetToOut) assertBits |= 1 << PIGPIO_OUT_DATA;
+		else releaseBits |= 1 << PIGPIO_OUT_DATA;
 
-		if (ClockSetToOut) set |= 1 << PIGPIO_OUT_CLOCK;
-		else clear |= 1 << PIGPIO_OUT_CLOCK;
-
-		if (!invertIECOutputs)
-		{
-			unsigned tmp = set;
-			set = clear;
-			clear = tmp;
-		}
+		if (ClockSetToOut) assertBits |= 1 << PIGPIO_OUT_CLOCK;
+		else releaseBits |= 1 << PIGPIO_OUT_CLOCK;
 
 		// GPSET0/GPCLR0 are two separate register writes, not one atomic
 		// change. If this call moves one line from released to asserted and
@@ -493,23 +500,27 @@ public:
 		// in the "wrong" order leaves a few-cycle window where the old level
 		// of one line is combined with the new level of the other - exactly
 		// the kind of transient a 2-bit-per-sample GEOS turbo read can latch
-		// as a corrupted nibble. Clear before set only in that case; keep the
-		// original set-then-clear order otherwise.
-		bool newlyAsserted = (set & ~oldSets) != 0;
-		bool newlyReleased = (clear & ~oldClears) != 0;
+		// as a corrupted nibble. Release before assert only in that case; keep
+		// the original assert-then-release order otherwise.
+		bool newlyAsserted = (assertBits & ~oldAssertBits) != 0;
+		bool newlyReleased = (releaseBits & ~oldReleaseBits) != 0;
+
+		u32 assertReg = invertIECOutputs ? ARM_GPIO_GPSET0 : ARM_GPIO_GPCLR0;
+		u32 releaseReg = invertIECOutputs ? ARM_GPIO_GPCLR0 : ARM_GPIO_GPSET0;
+
 		if (newlyAsserted && newlyReleased)
 		{
-			write32(ARM_GPIO_GPCLR0, clear);
-			write32(ARM_GPIO_GPSET0, set);
+			write32(releaseReg, releaseBits);
+			write32(assertReg, assertBits);
 		}
 		else
 		{
-			write32(ARM_GPIO_GPSET0, set);
-			write32(ARM_GPIO_GPCLR0, clear);
+			write32(assertReg, assertBits);
+			write32(releaseReg, releaseBits);
 		}
 
-		oldSets = set;
-		oldClears = clear;
+		oldAssertBits = assertBits;
+		oldReleaseBits = releaseBits;
 	}
 
 	// Sample only DATA and CLOCK from the physical pins right now, skipping
@@ -520,8 +531,15 @@ public:
 	// is visible to that same read instead of only showing up on the next
 	// periodic sample. ATN is deliberately left alone here: its CA1
 	// edge/ATNA-gate handling must stay on the periodic path only, or it can
-	// double-fire - this is what broke BASIC LOAD when a full periodic-style
-	// refresh was tried on every half-cycle instead (see AGENTS.md).
+	// double-fire - a full periodic-style refresh on every half-cycle was
+	// tried first and broke BASIC LOAD for exactly that reason.
+	//
+	// The cost is that a single LDA ORB can now mix ages: pb0/pb2 come from
+	// this sample while pb7 (ATN in) still holds whatever the last periodic
+	// read saw, up to ~1us earlier. Real hardware takes all three off one pin
+	// snapshot. Testing across GEOS 2.0, GDOS64 and WHEELS has not shown this
+	// biting, but it is the first thing to suspect if an ATN handshake ever
+	// desyncs here.
 	static inline void SampleIECInsNow(void)
 	{
 		if (!port)
@@ -733,8 +751,11 @@ public:
 	static bool OutputSound;
 
 private:
-	static u32 oldClears;
-	static u32 oldSets;
+	// Previous DATA/CLOCK state in bus terms (asserted = pulling low), not raw
+	// pin levels - see RefreshIECOutsNow(). Only ever covers PIGPIO_OUT_DATA
+	// and PIGPIO_OUT_CLOCK; nothing else writes them.
+	static u32 oldReleaseBits;
+	static u32 oldAssertBits;
 
 	static bool splitIECLines;
 	static bool invertIECInputs;
