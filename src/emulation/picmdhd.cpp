@@ -162,18 +162,29 @@ s32 cmdhd_scsiformat(scsi_context_t* scsi)
 	PiCMDHD* hd = (PiCMDHD*)(scsi->p);
 	int i;
 
-	// Nothing has been done yet, so the default is failure. Only zeroing the
-	// signature counts as having formatted the disk - an empty image, a read
-	// that failed part way through the scan, or a scan that ran to the end
-	// without finding a signature all leave the disk exactly as it was, and
-	// reporting GOOD for those is how FORMAT UNIT came to succeed over disks
-	// it had never touched.
-	s32 result = -1;
+	// What FORMAT UNIT is being asked for here is "leave no CMD signature on
+	// this disk", so the three outcomes are:
+	//
+	//   signature found and erased        - done, success
+	//   scanned the whole disk, none there - already true, success
+	//   could not look, or could not erase - failure
+	//
+	// The middle case matters: a fresh blank image has no signature, and
+	// formatting one is exactly what installing a new drive does. Reporting
+	// failure there would break it.
+	s32 result = 0;
 
-	// leave if we are not the first disk
+	// leave if we are not the first disk - nothing to do, which is not a
+	// failure
 	if (scsi->target != 0 || scsi->lun != 0)
 	{
 		return 0;
+	}
+
+	// An image with no size cannot be scanned, let alone formatted.
+	if (hd->imagesize == 0)
+	{
+		return -1;
 	}
 
 	// figure out where to start looking
@@ -199,9 +210,12 @@ s32 cmdhd_scsiformat(scsi_context_t* scsi)
 	while (scsi->address < hd->imagesize)
 	{
 		hd->scanSector = scsi->address;
-		// stop if we hit the end of the file
+		// stop if we hit the end of the file. The scan is incomplete, so
+		// whether a signature is present is now unknown - that is a failure,
+		// not a clean sweep.
 		if (scsi_image_read_uncached(scsi) < 0)
 		{
+			result = -1;
 			break;
 		}
 		// check for the CMD sig

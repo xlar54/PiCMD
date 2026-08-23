@@ -610,11 +610,15 @@ static u32 scsi_getmaxsize(scsi_context_t* context)
 
 // A background flush failed since the last command was processed. The host was
 // told that write succeeded and cannot be told otherwise, so it gets reported
-// against whatever comes next.
+// against a later command instead.
 //
-// Against ANY next command, not just another write: a host that has finished
-// writing may well only ever read again, or just poll TEST UNIT READY, and the
-// failure would then never surface at all.
+// Called from TEST UNIT READY, READ and WRITE - not from every command. Those
+// three are what a host actually does after writing (and TEST UNIT READY is
+// what it polls with), so the failure surfaces promptly in practice. The
+// commands that do not check - READ CAPACITY, MODE SENSE and friends - are
+// ones a host issues about the device rather than about its data, and adding
+// the check there would report a data error in answer to a question that was
+// not about data.
 static s32 scsi_imagecheck(scsi_context_t* context);
 
 static bool scsi_take_deferred_write_error(scsi_context_t* context)
