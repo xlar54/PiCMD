@@ -33,6 +33,26 @@ KERNEL  = $(TARGETDIR)/$(TARGET)
 
 all: $(KERNEL).img
 
+# Objects are built for one Pi and are not interchangeable - RASPPI selects
+# different -mcpu flags and different conditional code - but nothing in their
+# names or timestamps says which. Building for one target and then another
+# without cleaning silently reused the first target's objects; if you were
+# lucky it failed at link with missing symbols, and if you were not it linked
+# and produced a kernel for neither.
+#
+# So: a stamp named after the target. Asking for a different one finds no stamp
+# for it, and the tree is cleaned before anything is compiled.
+RASPPI_STAMP = $(TARGETDIR)/.built-for-$(RASPPI)
+
+$(RASPPI_STAMP):
+	@echo "  TARGET RASPPI=$(RASPPI) (cleaning: previous build was for another target)"
+	$(Q)$(RM) -r $(TARGETDIR)
+	$(Q)$(MAKE) -C uspi clean
+	@mkdir -p $(TARGETDIR)
+	@touch $@
+
+$(OBJS): $(RASPPI_STAMP)
+
 $(KERNEL).img: $(OBJS) $(LIBS)
 	@echo "  LINK $@"
 	$(Q)$(CC) $(CFLAGS) -o $(KERNEL).elf -Xlinker -Map=$(KERNEL).map -T linker.ld -nostartfiles $(OBJS) $(LIBS)
