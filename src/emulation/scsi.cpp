@@ -412,6 +412,25 @@ int ScsiImage::ReadSector(u32 lba, u8* buffer)
 	return 0;
 }
 
+int ScsiImage::ReadSectorPhysical(u32 lba, u8* buffer)
+{
+	accessCounter++;
+	if (!attached)
+		return -1;
+
+	if (lba >= sizeInSectors)
+		return -1;
+
+	UINT bytesRead = 0;
+	u32 t0 = read32(ARM_SYSTIMER_CLO);
+	if (f_lseek(&file, (u64)lba << 9) != FR_OK)
+		return -1;
+	if (f_read(&file, buffer, SECTOR_SIZE, &bytesRead) != FR_OK || bytesRead != SECTOR_SIZE)
+		return -1;
+	NoteStall(t0);
+	return 0;
+}
+
 int ScsiImage::ReadSectorUncached(u32 lba, u8* buffer)
 {
 	accessCounter++;
@@ -1509,25 +1528,48 @@ void scsi_process_ack(scsi_context_t* context)
 						context->asc = SCSI_SASC_WRITEFAULT;
 						context->status = SCSI_STATUS_CHECKCONDITION;
 					}
+					else if (context->cmd_buf[1] & 0x02)		// BYTCHK
+					{
+						// The initiator wants the blocks compared against data
+						// it is about to send. That needs a data-out phase and
+						// a comparison, neither of which is implemented - and
+						// answering GOOD would be claiming to have done a
+						// byte-for-byte check that never happened, which is
+						// the worst possible answer to give a verify.
+						context->sensekey = SCSI_SENSEKEY_ILLEGALREQUEST;
+						context->asc = SCSI_SASC_INVALIDFIELDINCDB;
+						context->status = SCSI_STATUS_CHECKCONDITION;
+					}
 					else
 					{
-						// Read each block. The data goes nowhere - VERIFY
-						// returns no data phase - but a sector that cannot be
-						// read is exactly what the command is asked to find.
+						// Read each block off the card itself.
+						//
+						// Not through the cache: that would verify the cache.
+						// A sector written a moment ago, or read earlier and
+						// still resident, comes back perfectly from a card
+						// that has since been pulled. Flush first as well, or
+						// the media is checked against contents the computer
+						// has been told are on it but are not yet.
+						ScsiImage* image = context->file[(context->target << 3) | context->lun];
 						context->status = SCSI_STATUS_GOOD;
-						for (u32 b = 0; b < (u32)context->blocks; ++b)
-						{
-							u32 saved = context->address;
-							context->address = saved + b;
-							s32 bad = scsi_image_read(context);
-							context->address = saved;
 
-							if (bad)
+						if (image->Sync(true) < 0)
+						{
+							context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+							context->asc = SCSI_SASC_WRITEFAULT;
+							context->status = SCSI_STATUS_CHECKCONDITION;
+						}
+						else
+						{
+							for (u32 b = 0; b < (u32)context->blocks; ++b)
 							{
-								context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
-								context->asc = SCSI_SASC_UNRECOVEREDREADERROR;
-								context->status = SCSI_STATUS_CHECKCONDITION;
-								break;
+								if (image->ReadSectorPhysical(context->address + b, context->data_buf) != 0)
+								{
+									context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+									context->asc = SCSI_SASC_UNRECOVEREDREADERROR;
+									context->status = SCSI_STATUS_CHECKCONDITION;
+									break;
+								}
 							}
 						}
 					}

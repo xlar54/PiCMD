@@ -1547,13 +1547,18 @@ void UpdateFirmwareToSD()
 			// zero), but a real one is a few hundred KB, so a floor well below
 			// any genuine build and a ceiling well above one rejects the
 			// obviously wrong without guessing at content.
-			static const u32 FIRMWARE_MIN_SIZE = 64 * 1024;
-			static const u32 FIRMWARE_MAX_SIZE = 8 * 1024 * 1024;
+			// Compared at FSIZE_t's own width, before any cast. exFAT is
+			// enabled in ffconf.h, so fsize is 64 bit - and casting first
+			// meant a file of 4GiB plus something plausible wrapped straight
+			// into the accepted range, after which only that low prefix was
+			// read and installed as the kernel.
+			static const FSIZE_t FIRMWARE_MIN_SIZE = 64 * 1024;
+			static const FSIZE_t FIRMWARE_MAX_SIZE = 8 * 1024 * 1024;
 
-			if (found && ((u32)filInfo.fsize < FIRMWARE_MIN_SIZE || (u32)filInfo.fsize > FIRMWARE_MAX_SIZE))
+			if (found && (filInfo.fsize < FIRMWARE_MIN_SIZE || filInfo.fsize > FIRMWARE_MAX_SIZE))
 			{
-				DEBUG_LOG("firmware: %s on USB is %u bytes, not a plausible kernel - ignoring\r\n",
-					firmwareName, (u32)filInfo.fsize);
+				DEBUG_LOG("firmware: %s on USB is %llu bytes, not a plausible kernel - ignoring\r\n",
+					firmwareName, (unsigned long long)filInfo.fsize);
 				found = false;
 			}
 

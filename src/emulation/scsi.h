@@ -61,6 +61,16 @@ public:
 	int ReadSectorUncached(u32 lba, u8* buffer);
 	int WriteSector(u32 lba, const u8* buffer);
 
+	// Read straight off the card, ignoring the cache entirely - not even as a
+	// shortcut, which is what separates this from ReadSectorUncached.
+	//
+	// Only VERIFY wants this. Verifying through the cache verifies the cache:
+	// a sector that was written a moment ago, or read earlier and still held,
+	// comes back fine from a card that has since been removed or has stopped
+	// answering. Flush before calling it, or what is on the card is not what
+	// the computer believes it wrote.
+	int ReadSectorPhysical(u32 lba, u8* buffer);
+
 	// Longest single SD access so far, in microseconds. The bus timeout that
 	// shows up as ?DEVICE NOT PRESENT is a few milliseconds, so this is the
 	// number that says whether the cache is doing its job.
