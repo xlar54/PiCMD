@@ -167,7 +167,7 @@ Options::Options(void)
 {
 	autoMountImageName[0] = 0;
 	strcpy(ROMFontName, "chargen");
-	strcpy(LcdLogoName, "1541ii");
+	strcpy(LcdLogoName, "cmd");
 	ROMNameCMDHD[0] = 0;
 	// GetLCDName is called whether or not options.txt sets LCDName, and it was
 	// left uninitialised - so with no LCDName line it returned a pointer into
