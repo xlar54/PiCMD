@@ -160,7 +160,7 @@ Options::Options(void)
 {
 	autoMountImageName[0] = 0;
 	strcpy(ROMFontName, "chargen");
-	strcpy(LcdLogoName, "1541ii");
+	strcpy(LcdLogoName, "cmd");
 	ROMNameCMDHD[0] = 0;
 }
 

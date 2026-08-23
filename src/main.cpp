@@ -285,7 +285,12 @@ void InitialiseLCD()
 		screenLCD->ClearInit(0); // sh1106 needs this
 
 		bool logo_done = false;
-		if ( (height == 64) && (strcasecmp(options.GetLcdLogoName(), "1541ii") == 0) )
+		if ((height == 64) && (strcasecmp(options.GetLcdLogoName(), "cmd") == 0))
+		{
+			screenLCD->PlotRawImage(logo_ssd_cmd, 0, 0, width, height);
+			logo_done = true;
+		}
+		else if ( (height == 64) && (strcasecmp(options.GetLcdLogoName(), "1541ii") == 0) )
 		{
 			screenLCD->PlotRawImage(logo_ssd_1541ii, 0, 0, width, height);
 			snprintf(tempBuffer, tempBufferSize, "Pi-CMD V%d.%02d", versionMajor, versionMinor);
