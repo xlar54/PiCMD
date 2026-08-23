@@ -435,9 +435,14 @@ bool FileBrowser::BrowsableList::CheckBrowseNavigation()
 
 		searchLastKeystrokeTime = 0;
 
-		searchPrefix[searchPrefixIndex] = searchChar;
+		// Store only when there is somewhere for the terminator to go. The
+		// character used to be written unconditionally, so on the last slot it
+		// overwrote the NUL while the guard below stopped a new one being
+		// added - leaving an unterminated buffer that PrintText then walked
+		// off the end of.
 		if (searchPrefixIndex < KEYBOARD_SEARCH_BUFFER_SIZE - 1)
 		{
+			searchPrefix[searchPrefixIndex] = searchChar;
 			searchPrefixIndex++;
 			searchPrefix[searchPrefixIndex] = 0;
 			dirty |= 1;

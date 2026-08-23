@@ -153,8 +153,15 @@ public:
 
 		struct Entry
 		{
+			// Both FILINFOs get cleared, not just caddyIndex. f_readdir fills
+			// them in completely, but the synthetic entries - "..", the device
+			// list - are built by hand and only ever OR AM_DIR into fattrib,
+			// so anything else left on the stack stayed set. A stray AM_RDO
+			// makes an entry render as read only and be treated that way.
 			Entry() : caddyIndex(-1)
 			{
+				memset(&filImage, 0, sizeof(filImage));
+				memset(&filIcon, 0, sizeof(filIcon));
 			}
 			FILINFO filImage;
 			FILINFO filIcon;

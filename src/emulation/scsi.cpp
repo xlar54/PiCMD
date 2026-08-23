@@ -993,13 +993,30 @@ void scsi_process_ack(scsi_context_t* context)
 					/* accept defect list, just don't do anything about it */
 					if (context->seq == 4)
 					{
-						context->seq = ((context->data_buf[0] << 24) |
+						// The four byte header says how long the list is. That
+						// belongs in data_max - the count of bytes still to
+						// come - not in seq, which is the index the next byte
+						// is stored at. Assigning it to seq meant the byte
+						// after the header was written at data_buf[length],
+						// and with the cap at 512 on a 512 byte buffer that is
+						// one past the end.
+						u32 listBytes = ((context->data_buf[0] << 24) |
 							(context->data_buf[1] << 16) |
 							(context->data_buf[2] << 8) |
 							(context->data_buf[3])) + 4;
-						if (context->seq > 512)
+
+						if (listBytes > sizeof(context->data_buf))
+							listBytes = sizeof(context->data_buf);
+
+						context->data_max = listBytes;
+
+						// An empty list leaves nothing to receive, so finish
+						// here rather than waiting for a byte that is not
+						// coming.
+						if (context->seq >= context->data_max)
 						{
-							context->seq = 512;
+							context->status = SCSI_STATUS_GOOD;
+							context->state = SCSI_STATE_STATUS;
 						}
 					}
 					else

@@ -1557,32 +1557,48 @@ void UpdateFirmwareToSD()
 							{
 								if (f_chdir("\\") == FR_OK)
 								{
-									bool same = true;
-									if (FR_OK == f_open(&fp, firmwareName, FA_READ))
+									// Compare sizes before contents. The old loop read fixed 256
+									// byte blocks with the result ignored, which went wrong three
+									// ways: a shorter file on the card hit EOF, returned zero
+									// bytes, never advanced the index and span forever; a size
+									// that is not a multiple of 256 read past the end of the USB
+									// image; and a longer file with the same leading bytes
+									// counted as identical.
+									bool same = false;
+									FILINFO sdInfo;
+									if (f_stat(firmwareName, &sdInfo) == FR_OK &&
+										(u32)sdInfo.fsize == (u32)filInfo.fsize)
 									{
-										char* ptr = mem;
-										char buffer[256];
-										unsigned bufferIndex = 0;
-										unsigned bytesRead;
-										do
+										if (FR_OK == f_open(&fp, firmwareName, FA_READ))
 										{
-											f_read(&fp, buffer, 256, &bytesRead);
-
-											for (unsigned index = 0; index < bytesRead; ++index)
+											char buffer[256];
+											u32 offset = 0;
+											same = true;
+											while (same && offset < (u32)filInfo.fsize)
 											{
-												if (buffer[index] != mem[bufferIndex + index])
+												unsigned want = (u32)filInfo.fsize - offset;
+												if (want > sizeof(buffer))
+													want = sizeof(buffer);
+
+												unsigned bytesRead = 0;
+												if (f_read(&fp, buffer, want, &bytesRead) != FR_OK || bytesRead != want)
 												{
+													// Could not read it all, so we do not know it matches.
 													same = false;
 													break;
 												}
+
+												if (memcmp(buffer, mem + offset, want) != 0)
+													same = false;
+
+												offset += want;
 											}
-											bufferIndex += bytesRead;
-										} while (same && (bufferIndex < (u32)filInfo.fsize));
-										f_close(&fp);
+											f_close(&fp);
+										}
 									}
 
 									screen.Clear(COLOUR_BLACK);
-									if (!same && (FR_OK == f_open(&fp, firmwareName, FA_CREATE_ALWAYS | FA_WRITE)))
+									if (!same)
 									{
 										snprintf(tempBuffer, tempBufferSize, "Updating firmware.\r\n");
 										screen.MeasureText(false, tempBuffer, &widthText, &heightText);
@@ -1590,8 +1606,37 @@ void UpdateFirmwareToSD()
 										ypos = (heightScreen - heightText) >> 1;
 										screen.PrintText(false, xpos, ypos, tempBuffer, COLOUR_WHITE, COLOUR_RED);
 
-										res = f_write(&fp, mem, (u32)filInfo.fsize, &bytes);
-										f_close(&fp);
+										// Write a temporary file and only put it in place once it
+										// is known to be complete. FA_CREATE_ALWAYS on kernel.img
+										// destroyed the working kernel before the replacement
+										// existed, so a full or failing card left the machine with
+										// a truncated image and nothing to boot. The write and the
+										// close were both unchecked as well.
+										const char* tempName = "kernel.new";
+										bool written = false;
+
+										if (FR_OK == f_open(&fp, tempName, FA_CREATE_ALWAYS | FA_WRITE))
+										{
+											bytes = 0;
+											FRESULT wres = f_write(&fp, mem, (u32)filInfo.fsize, &bytes);
+											FRESULT cres = f_close(&fp);
+											written = (wres == FR_OK) && (cres == FR_OK) && (bytes == (u32)filInfo.fsize);
+										}
+
+										if (written && f_unlink(firmwareName) == FR_OK &&
+											f_rename(tempName, firmwareName) == FR_OK)
+										{
+											DEBUG_LOG("firmware: updated %s\r\n", firmwareName);
+										}
+										else
+										{
+											// Leave whatever is there alone rather than half
+											// replacing it.
+											f_unlink(tempName);
+											DEBUG_LOG("firmware: update failed, keeping the existing kernel\r\n");
+											snprintf(tempBuffer, tempBufferSize, "Firmware update FAILED.\r\n");
+											screen.PrintText(false, xpos, ypos, tempBuffer, COLOUR_WHITE, COLOUR_RED);
+										}
 									}
 								}
 							}
