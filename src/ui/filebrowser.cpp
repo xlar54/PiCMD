@@ -529,7 +529,7 @@ FileBrowser::FileBrowser(InputMappings* inputMappings, const char* romName, bool
 {
 	selectedDHDPath[0] = 0;
 	selectedDHDReadOnly = false;
-	lastSelectionName = 0;
+	lastSelectionName[0] = 0;
 
 	folder.scrollHighlightRate = scrollHighlightRate;
 
@@ -1215,7 +1215,7 @@ void FileBrowser::UpdateInputFolders()
 					selectionsMade = FillCaddyWithSelections();
 
 					if (selectionsMade)
-						lastSelectionName = current->filImage.fname;
+						SetLastSelectionName(current->filImage.fname);
 
 					dirty = true;
 				}
@@ -1360,7 +1360,7 @@ void FileBrowser::SelectAutoMountImage(const char* image)
 		// selectionsMade true, and the browser loop then hands
 		// LastSelectionName() to BeginEmulating for the icon lookup. Without
 		// it that pointer was whatever the member happened to contain.
-		lastSelectionName = current->filImage.fname;
+		SetLastSelectionName(current->filImage.fname);
 		selectionsMade = FillCaddyWithSelections();
 	}
 }
