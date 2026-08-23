@@ -200,9 +200,13 @@ private:
 #define SCSI_STATUS_CHECKCONDITION           0x01
 
 #define SCSI_SENSEKEY_NOSENSE        0x00
+#define SCSI_SENSEKEY_NOTREADY       0x02
 #define SCSI_SENSEKEY_MEDIUMERROR    0x03
 #define SCSI_SENSEKEY_ILLEGALREQUEST 0x05
 
+#define SCSI_SASC_WRITEFAULT                    0x03
+#define SCSI_SASC_UNRECOVEREDREADERROR          0x11
+#define SCSI_SASC_MEDIUMNOTPRESENT              0x3A
 #define SCSI_SASC_LOGICALBLOCKADDRESSOUTOFRANGE 0x21
 #define SCSI_SASC_INVALIDFIELDINCDB             0x24
 #define SCSI_SASC_INVALIDFIELDINPARAMETERLIST   0x26
@@ -263,7 +267,10 @@ typedef struct scsi_context_s
 	u32 log;
 	ScsiImage* file[SCSI_MAX_DISKS];
 	void* p;
-	void (*user_format)(struct scsi_context_s*);
+	// Returns 0 on success. FORMAT UNIT used to report GOOD whatever the
+	// handler did, so a format onto read-only media or a failing card looked
+	// like it had worked.
+	s32 (*user_format)(struct scsi_context_s*);
 	void (*user_read)(struct scsi_context_s*);
 	void (*user_write)(struct scsi_context_s*);
 } scsi_context_t;

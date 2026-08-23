@@ -157,15 +157,34 @@ void cmdhd_scsiwrite(scsi_context_t* scsi)
 }
 
 // We don't actually format the disk, we just remove the 16 byte CMD signature
-void cmdhd_scsiformat(scsi_context_t* scsi)
+s32 cmdhd_scsiformat(scsi_context_t* scsi)
 {
 	PiCMDHD* hd = (PiCMDHD*)(scsi->p);
 	int i;
 
-	// leave if we are not the first disk
+	// What FORMAT UNIT is being asked for here is "leave no CMD signature on
+	// this disk", so the three outcomes are:
+	//
+	//   signature found and erased        - done, success
+	//   scanned the whole disk, none there - already true, success
+	//   could not look, or could not erase - failure
+	//
+	// The middle case matters: a fresh blank image has no signature, and
+	// formatting one is exactly what installing a new drive does. Reporting
+	// failure there would break it.
+	s32 result = 0;
+
+	// leave if we are not the first disk - nothing to do, which is not a
+	// failure
 	if (scsi->target != 0 || scsi->lun != 0)
 	{
-		return;
+		return 0;
+	}
+
+	// An image with no size cannot be scanned, let alone formatted.
+	if (hd->imagesize == 0)
+	{
+		return -1;
 	}
 
 	// figure out where to start looking
@@ -191,9 +210,12 @@ void cmdhd_scsiformat(scsi_context_t* scsi)
 	while (scsi->address < hd->imagesize)
 	{
 		hd->scanSector = scsi->address;
-		// stop if we hit the end of the file
+		// stop if we hit the end of the file. The scan is incomplete, so
+		// whether a signature is present is now unknown - that is a failure,
+		// not a clean sweep.
 		if (scsi_image_read_uncached(scsi) < 0)
 		{
+			result = -1;
 			break;
 		}
 		// check for the CMD sig
@@ -205,14 +227,17 @@ void cmdhd_scsiformat(scsi_context_t* scsi)
 			{
 				scsi->data_buf[0x1f0 + i] = 0;
 			}
-			// write it back
-			scsi_image_write(scsi);
+			// write it back. If that fails the signature is still there and
+			// the disk is not formatted, so say so rather than reporting a
+			// successful FORMAT UNIT over an untouched disk.
+			result = scsi_image_write(scsi);
 			break;
 		}
 		// otherwise, keep looking
 		scsi->address += 128;
 	}
 	hd->scanTotal = 0;
+	return result;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
