@@ -40,6 +40,28 @@ SSD1306::SSD1306(int BSCMaster, u8 address, unsigned width, unsigned height, int
 	sizeof_frame = width*height/8;
 	frame = (unsigned char *)malloc(sizeof_frame);
 	oldFrame = (unsigned char *)malloc(sizeof_frame);
+
+	if (!frame || !oldFrame)
+	{
+		// Nothing can be drawn without these, and every refresh dereferences
+		// them. Better to end up with no display than a wild write.
+		free(frame);
+		free(oldFrame);
+		frame = 0;
+		oldFrame = 0;
+		sizeof_frame = 0;
+		return;
+	}
+
+	// oldFrame is the "what the panel is already showing" shadow, and refreshes
+	// only send the bytes that differ from it. Left as whatever malloc handed
+	// back, any byte that happened to match the new frame was skipped - so the
+	// first clear could leave power on garbage on the panel indefinitely.
+	// 0xFF rather than 0 so the first frame differs everywhere and is sent in
+	// full whatever it contains.
+	memset(frame, 0, sizeof_frame);
+	memset(oldFrame, 0xff, sizeof_frame);
+
 	RPI_I2CInit(BSCMaster, 1);
 	InitHardware();
 }
@@ -253,8 +275,18 @@ void SSD1306::SetContrast(u8 value)
 	contrast = value;
 	SendCommand(SSD1306_CMD_SET_CONTRAST_CONTROL);
 	SendCommand(value);
+
+	// This was "value >> 8" on a u8, which is always 0 - so VCOM deselect has
+	// only ever been programmed to level 0, whatever the contrast setting.
+	// Scaling it from the contrast (value >> 5, giving the 0-7 the register
+	// takes) looks like what was meant, but that changes how every non-1106
+	// panel actually looks and nobody has compared them side by side. Keeping
+	// the shipped behaviour and naming it, rather than quietly altering
+	// everyone's display as a side effect of a bug fix.
+	static const u8 VCOM_DESELECT_LEVEL = 0;
+
 	if (type != LCD_1106_128x64)	// dont fiddle vcomdeselect on 1106 displays
-		SetVCOMDeselect( value >> 8);
+		SetVCOMDeselect(VCOM_DESELECT_LEVEL);
 }
 
 void SSD1306::SetVCOMDeselect(u8 value)
