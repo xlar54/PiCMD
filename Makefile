@@ -49,3 +49,8 @@ clean:
 	$(MAKE) -C uspi clean
 
 include Makefile.rules
+
+# Pull in the header dependencies the compiler recorded next to each object.
+# Leading dash so the first build, when none of them exist yet, is not an
+# error. These live under $(TARGETDIR) and go with it on a clean.
+-include $(OBJS:.o=.d)

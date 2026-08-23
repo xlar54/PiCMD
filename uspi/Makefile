@@ -40,6 +40,9 @@ $(TARGET).a: $(OBJS)
 	$(Q)$(AR) cr $(TARGET).a $(OBJS)
 
 clean:
-	$(Q)$(RM) $(OBJS) $(TARGET).a
+	$(Q)$(RM) $(OBJS) $(OBJS:.o=.d) $(TARGET).a
 
 include ../Makefile.rules
+
+# Header dependencies, as in the top level Makefile.
+-include $(OBJS:.o=.d)

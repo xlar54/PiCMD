@@ -43,6 +43,20 @@ CFLAGS	 += $(ARCH) -Wall -Wno-unused-variable -Wno-unused-but-set-variable -Wno-
 CPPFLAGS := $(CFLAGS) $(CPPFLAGS) -fno-exceptions -fno-rtti -std=c++0x -Wno-write-strings
 CFLAGS	 += -fno-delete-null-pointer-checks -fdata-sections -ffunction-sections -u _printf_float -std=gnu99
 
+# Header dependencies. -MMD writes a .d file beside each .o listing the headers
+# that went into it, and -MP adds a phony target for each of those headers so a
+# deleted or renamed one does not turn into "No rule to make target".
+#
+# Without this the build only knew about .c and .cpp timestamps, and a great
+# deal of this emulator lives in headers - iec_bus.h is inlined into main.o,
+# m65c02.h carries the CPU core. Editing one of those and rebuilding produced a
+# kernel containing some of the change and not the rest, which on real hardware
+# is genuinely hard to tell apart from a bug in the change itself. The whole
+# tree had to be rebuilt every time to be sure.
+DEPFLAGS  = -MMD -MP
+CFLAGS   += $(DEPFLAGS)
+CPPFLAGS += $(DEPFLAGS)
+
 .PHONY: clean
 
 # Two sets of rules, because this file is shared with uspi/Makefile.

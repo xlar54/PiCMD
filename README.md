@@ -448,28 +448,29 @@ make RASPPI=3          # produces target/kernel.img
 time.
 
 On Windows, `build.bat` finds the toolchain and the right make for you, and
-avoids two traps worth knowing about:
+avoids a trap worth knowing about:
 
 ```
-build.bat            clean build for a Pi 3
-build.bat 2          clean build for a Pi 2
-build.bat 3 quick    incremental
+build.bat            incremental build for a Pi 3
+build.bat 2          incremental build for a Pi 2
+build.bat 3 clean    full rebuild
 ```
 
-1. **`make` must be MSYS2's**, not GnuWin32's. GnuWin32 make gets part way and
-   then fails on the recursive sub-make for `uspi`, because its own install
-   path contains spaces and brackets (`C:\Program Files (x86)\...`) which the
-   shell it invokes cannot parse. The error is a shell syntax error near `(`
-   and looks nothing like a build problem. If both are installed, GnuWin32 is
-   usually first on `PATH`, so this is the default outcome rather than an edge
-   case.
+**`make` must be MSYS2's**, not GnuWin32's. GnuWin32 make gets part way and
+then fails on the recursive sub-make for `uspi`, because its own install path
+contains spaces and brackets (`C:\Program Files (x86)\...`) which the shell it
+invokes cannot parse. The error is a shell syntax error near `(` and looks
+nothing like a build problem. If both are installed, GnuWin32 is usually first
+on `PATH`, so this is the default outcome rather than an edge case.
 
-2. **The Makefile does not track header dependencies**, and a good deal of this
-   emulator lives in headers - `iec_bus.h` is inlined into `main.o`, for
-   instance. An incremental build after editing a header yields a kernel
-   containing only some of your changes, which is unpleasant to debug on real
-   hardware. `build.bat` cleans first unless you say `quick`; with plain `make`,
-   run `make clean` before any build you intend to flash.
+Header dependencies are tracked (`-MMD -MP` writes a `.d` beside each object),
+so editing a header rebuilds everything that includes it and nothing else.
+That matters here because a good deal of this emulator lives in headers -
+`iec_bus.h` is inlined into `main.o`, `m65c02.h` carries the CPU core - and
+before this was in place an incremental build after editing one produced a
+kernel with part of the change in it, which on real hardware looks exactly
+like a bug in the change. `make clean` is no longer needed before a build you
+intend to flash.
 
 ## Licence & credits
 

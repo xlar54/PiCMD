@@ -1,9 +1,9 @@
 @echo off
 rem Build Pi-CMD on Windows.
 rem
-rem   build.bat            clean build for a Pi 3 (RASPPI=3)
-rem   build.bat 2          clean build for a Pi 2
-rem   build.bat 3 quick    incremental build - see the warning below
+rem   build.bat            incremental build for a Pi 3 (RASPPI=3)
+rem   build.bat 2          incremental build for a Pi 2
+rem   build.bat 3 clean    full rebuild
 rem
 rem This sets up the environment itself rather than relying on PATH, because
 rem two things need to be right and neither is obvious:
@@ -89,19 +89,23 @@ for /f "delims=" %%V in ('arm-none-eabi-gcc -dumpversion') do echo arm gcc     :
 echo target      : RASPPI=%RASPPI%
 
 rem ---------------------------------------------------------------------------
-rem Build. Clean by default.
+rem Build. Incremental by default.
 rem
-rem The Makefile does not track header dependencies, and a lot of this emulator
-rem lives in headers - iec_bus.h is inlined into main.o, for instance. An
-rem incremental build after editing a header produces a kernel containing only
-rem some of your changes, which is genuinely hard to debug on real hardware.
-rem So: clean unless you explicitly ask otherwise.
+rem The Makefile tracks header dependencies now (-MMD -MP), so editing a header
+rem rebuilds everything that includes it and nothing else. This used to be a
+rem clean build every time because it could not: a lot of this emulator lives in
+rem headers - iec_bus.h is inlined into main.o - and an incremental build after
+rem editing one produced a kernel with some of the change in it and not the
+rem rest, which on real hardware looks exactly like a bug in the change.
+rem
+rem   build.bat 3          incremental
+rem   build.bat 3 clean    full rebuild
 rem ---------------------------------------------------------------------------
-if /i "%2"=="quick" (
-  echo mode        : incremental ^(WARNING: header changes may not be picked up^)
-) else (
+if /i "%2"=="clean" (
   echo mode        : clean
   "%MAKEEXE%" clean >nul 2>nul
+) else (
+  echo mode        : incremental
 )
 echo.
 
