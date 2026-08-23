@@ -157,9 +157,15 @@ DRESULT disk_read (
 	}
 	else
 	{
-		unsigned bytes = (unsigned)USPiMassStorageDeviceRead((unsigned long long )(sector << UMSD_BLOCK_SHIFT), buff, count << UMSD_BLOCK_SHIFT, pdrv - 1);
+		// Widen before shifting, not after. sector is a 32 bit DWORD, so
+		// "(unsigned long long)(sector << SHIFT)" does the shift in 32 bits
+		// and casts the result that has already overflowed - sector 8388608
+		// lands at byte offset 0. The cast has to be on the operand.
+		unsigned long long offset = ((unsigned long long)sector) << UMSD_BLOCK_SHIFT;
+		unsigned wanted = count << UMSD_BLOCK_SHIFT;
+		unsigned bytes = (unsigned)USPiMassStorageDeviceRead(offset, buff, wanted, pdrv - 1);
 
-		if (bytes != (count << UMSD_BLOCK_SHIFT))
+		if (bytes != wanted)
 			return RES_ERROR;
 
 		return RES_OK;
@@ -196,10 +202,13 @@ DRESULT disk_write (
 	}
 	else
 	{
-		unsigned bytes = (unsigned)USPiMassStorageDeviceWrite(sector << UMSD_BLOCK_SHIFT, buff, count << UMSD_BLOCK_SHIFT, pdrv - 1);
+		// Same widening as disk_read - this one did not even have the cast.
+		unsigned long long offset = ((unsigned long long)sector) << UMSD_BLOCK_SHIFT;
+		unsigned wanted = count << UMSD_BLOCK_SHIFT;
+		unsigned bytes = (unsigned)USPiMassStorageDeviceWrite(offset, buff, wanted, pdrv - 1);
 
 		//DEBUG_LOG("USB disk_write %d %d\r\n", (int)sector, (int)count);
-		if (bytes != (count << UMSD_BLOCK_SHIFT))
+		if (bytes != wanted)
 			return RES_ERROR;
 
 		return RES_OK;
@@ -220,6 +229,24 @@ DRESULT disk_ioctl (
 	void *buff		/* Buffer to send/receive control data */
 )
 {
+	// CTRL_SYNC has to succeed. Both drivers behind this are synchronous -
+	// sd_write and USPiMassStorageDeviceWrite have finished with the media by
+	// the time they return - so there is no deferred write to push out and
+	// nothing to do.
+	//
+	// Returning RES_PARERR for it meant sync_fs turned every f_sync into
+	// FR_DISK_ERR (ff.cpp: "if (disk_ioctl(fs->drv, CTRL_SYNC, 0) != RES_OK)
+	// res = FR_DISK_ERR"). That was harmless while nothing checked f_sync's
+	// result, but the disk cache now treats a failed sync as a lost write, so
+	// every successful flush was being reported as a write error - which then
+	// latched, and came back to the computer as CHECK CONDITION on its next
+	// command. f_close was failing to finish cleanly for the same reason.
+	//
+	// With _MIN_SS == _MAX_SS and mkfs and trim both disabled in ffconf.h,
+	// this is the only ioctl FatFS ever issues; the rest stay unsupported.
+	if (cmd == CTRL_SYNC)
+		return RES_OK;
+
 	//DRESULT res;
 	//int result;
 
