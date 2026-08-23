@@ -1530,7 +1530,13 @@ void UpdateFirmwareToSD()
 		{
 			f_chdir("\\");
 
-			bool found = f_findfirst(&dir, &filInfo, ".", firmwareName) == FR_OK;
+			// f_findfirst returns FR_OK when there is no match too, leaving
+			// fname empty and the rest of filInfo untouched - so testing the
+			// result alone let a missing kernel.img through and handed an
+			// uninitialised fsize to malloc.
+			bool found = (f_findfirst(&dir, &filInfo, ".", firmwareName) == FR_OK) &&
+				(filInfo.fname[0] != 0);
+			f_closedir(&dir);
 
 			if (found)
 			{
@@ -1623,15 +1629,42 @@ void UpdateFirmwareToSD()
 											written = (wres == FR_OK) && (cres == FR_OK) && (bytes == (u32)filInfo.fsize);
 										}
 
-										if (written && f_unlink(firmwareName) == FR_OK &&
-											f_rename(tempName, firmwareName) == FR_OK)
+										// Keep the old kernel until the new one is in
+										// place. Deleting it first and then renaming
+										// left nothing at all if the rename failed -
+										// and the error path deleted the replacement
+										// too, so a failure there was still an
+										// unbootable card. Moving it aside instead
+										// means the worst case is a machine that
+										// needs kernel.bak renamed back by hand.
+										const char* backupName = "kernel.bak";
+										bool updated = false;
+
+										if (written)
+										{
+											f_unlink(backupName);		// clear any stale backup
+
+											if (f_rename(firmwareName, backupName) == FR_OK)
+											{
+												if (f_rename(tempName, firmwareName) == FR_OK)
+												{
+													f_unlink(backupName);
+													updated = true;
+												}
+												else
+												{
+													// Put the working kernel back.
+													f_rename(backupName, firmwareName);
+												}
+											}
+										}
+
+										if (updated)
 										{
 											DEBUG_LOG("firmware: updated %s\r\n", firmwareName);
 										}
 										else
 										{
-											// Leave whatever is there alone rather than half
-											// replacing it.
 											f_unlink(tempName);
 											DEBUG_LOG("firmware: update failed, keeping the existing kernel\r\n");
 											snprintf(tempBuffer, tempBufferSize, "Firmware update FAILED.\r\n");
