@@ -287,13 +287,14 @@ void InitialiseLCD()
 		bool logo_done = false;
 		if ((height == 64) && (strcasecmp(options.GetLcdLogoName(), "cmd") == 0))
 		{
+			// No version string over this one, unlike the 1541ii logo. The
+			// artwork occupies rows 9-53 and PlotCharacter replaces whole
+			// character cells rather than compositing into them, so a line of
+			// the 8x16 font at row 0 covers rows 0-15 and takes the top off
+			// the mark. The only blank band is rows 56-63, which is half a
+			// character too short. The version is on the HDMI splash and in
+			// the no-logo fallback below.
 			screenLCD->PlotRawImage(logo_ssd_cmd, 0, 0, width, height);
-			// Version over the splash, as the 1541ii logo does. This is now
-			// the default logo, so without it nobody sees the version at boot
-			// unless they go looking - and "which build is on this card" is
-			// the first question every bug report needs answered.
-			snprintf(tempBuffer, tempBufferSize, "Pi-CMD V%d.%02d", versionMajor, versionMinor);
-			screenLCD->PrintText(false, 16, 0, tempBuffer, 0xffffffff);
 			logo_done = true;
 		}
 		else if ( (height == 64) && (strcasecmp(options.GetLcdLogoName(), "1541ii") == 0) )
@@ -950,6 +951,17 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 	unsigned ctAfter = 0;
 	int resetCount = 0;
 
+	// Idle flush state. Locals rather than statics inside the loop: they used
+	// to persist across calls, so a failing image that had backed the retry
+	// off to half a minute handed that delay to whatever was mounted next -
+	// and a healthy image would then sit on acknowledged writes for thirty
+	// seconds before its first flush, for a fault that was not its own.
+	static const u32 FLUSH_IDLE_LOOPS = 500000;			// ~0.5s at this loop's 1MHz
+	static const u32 FLUSH_MAX_LOOPS = 32000000;		// ~32s
+	u32 lastAccessCount = 0;
+	u32 quietLoops = 0;
+	u32 flushAfterLoops = FLUSH_IDLE_LOOPS;
+
 	unsigned buttonSwap8 = options.GetCMDHDButtonSwap8();
 	unsigned buttonSwap9 = options.GetCMDHDButtonSwap9();
 	unsigned buttonWP = options.GetCMDHDButtonWP();
@@ -1007,9 +1019,6 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 		// away. Doing this on a timer instead landed it between SCSI commands,
 		// which is the worst possible moment.
 		{
-			static u32 lastAccessCount = 0;
-			static u32 quietLoops = 0;
-			static u32 flushAfterLoops = 500000;		// this loop runs at 1MHz
 			u32 accessCount = ScsiImage::AccessCounter();
 			if (accessCount != lastAccessCount || IEC_Bus::IsAtnAsserted())
 			{
@@ -1029,9 +1038,6 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 				// is never going to land. Doubling up to a ceiling keeps the
 				// retries going without making the fault worse than the
 				// original problem.
-				static const u32 FLUSH_IDLE_LOOPS = 500000;			// ~0.5s
-				static const u32 FLUSH_MAX_LOOPS = 32000000;		// ~32s
-
 				if (ScsiImage::FlushAll() != 0)
 				{
 					flushAfterLoops <<= 1;
