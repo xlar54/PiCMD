@@ -25,6 +25,28 @@
 
 #define INVALID_VALUE	((unsigned) -1)
 
+// Copy an option value into a fixed buffer, terminated.
+//
+// Every one of these was "strncpy(dest, pValue, 255)" into a char[256], which
+// writes no terminator at all when the value is 255 characters or longer -
+// strncpy only copies one if it finds one inside the count. Byte 255 then held
+// whatever was there before, and the result was handed to f_open, strcasecmp
+// and PrintText as if it were a string.
+static void CopyOption(char* dest, unsigned size, const char* value)
+{
+	if (!dest || !size)
+		return;
+
+	if (!value)
+	{
+		dest[0] = 0;
+		return;
+	}
+
+	strncpy(dest, value, size - 1);
+	dest[size - 1] = 0;
+}
+
 char* TextParser::GetToken(bool includeSpace)
 {
 	bool isSpace;
@@ -211,11 +233,11 @@ void Options::Process(char* buffer)
 
 		if ((strcasecmp(pOption, "Font") == 0) || (strcasecmp(pOption, "ChargenFont") == 0))
 		{
-			strncpy(ROMFontName, pValue, 255);
+			CopyOption(ROMFontName, sizeof(ROMFontName), pValue);
 		}
 		else if ((strcasecmp(pOption, "AutoMountImage") == 0))
 		{
-			strncpy(autoMountImageName, pValue, 255);
+			CopyOption(autoMountImageName, sizeof(autoMountImageName), pValue);
 		}
 		ELSE_CHECK_DECIMAL_OPTION(onResetChangeToStartingFolder)
 		ELSE_CHECK_DECIMAL_OPTION(supportUARTInput)
@@ -252,11 +274,11 @@ void Options::Process(char* buffer)
 		ELSE_CHECK_DECIMAL_OPTION(CMDHDButtonExit)
 		else if ((strcasecmp(pOption, "LCDLogoName") == 0))
 		{
-			strncpy(LcdLogoName, pValue, 255);
+			CopyOption(LcdLogoName, sizeof(LcdLogoName), pValue);
 		}
 		else if ((strcasecmp(pOption, "LCDName") == 0))
 		{
-			strncpy(LCDName, pValue, 255);
+			CopyOption(LCDName, sizeof(LCDName), pValue);
 			if (strcasecmp(pValue, "ssd1306_128x64") == 0)
 				i2cLcdModel = LCD_1306_128x64;
 			else if (strcasecmp(pValue, "ssd1306_128x32") == 0)
@@ -266,7 +288,7 @@ void Options::Process(char* buffer)
 		}
 		else if ((strcasecmp(pOption, "CMDHDRomName") == 0) || (strcasecmp(pOption, "ROMCMDHD") == 0))
 		{
-			strncpy(ROMNameCMDHD, pValue, 255);
+			CopyOption(ROMNameCMDHD, sizeof(ROMNameCMDHD), pValue);
 		}
 		ELSE_CHECK_DECIMAL_OPTION(CMDHDDeviceID)
 		ELSE_CHECK_DECIMAL_OPTION(CMDHDCacheMB)

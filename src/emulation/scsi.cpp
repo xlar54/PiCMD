@@ -1349,6 +1349,20 @@ void scsi_process_ack(scsi_context_t* context)
 					context->lun = (context->cmd_buf[1] >> 5) & 7;
 					context->link = context->cmd_buf[9] & 1;
 					context->data_max = 8;
+
+					// Say there is no medium rather than describing an absent
+					// one as a zero length disk. Every other command checks
+					// this; capacity did not, and eight zero bytes with GOOD
+					// reads as "a disk, empty" instead of "no disk".
+					if (scsi_imagecheck(context))
+					{
+						context->sensekey = SCSI_SENSEKEY_NOTREADY;
+						context->asc = SCSI_SASC_MEDIUMNOTPRESENT;
+						context->status = SCSI_STATUS_CHECKCONDITION;
+						context->state = SCSI_STATE_STATUS;
+						break;
+					}
+
 					j = scsi_getmaxsize(context);
 					if (j == 0)
 					{
@@ -1462,10 +1476,61 @@ void scsi_process_ack(scsi_context_t* context)
 					context->state = SCSI_STATE_STATUS;
 					break;
 				case SCSI_COMMAND_VERIFY:
+					// This used to answer GOOD without looking at anything -
+					// no media check, no range check, no read - so a verify
+					// pronounced missing, out of range or unreadable sectors
+					// healthy, which is worse than not supporting it. Check
+					// what can be checked cheaply and read the blocks back.
 					context->lun = (context->cmd_buf[1] >> 5) & 7;
 					context->link = context->cmd_buf[9] & 1;
-					context->status = SCSI_STATUS_GOOD;
+					context->address = (context->cmd_buf[2] << 24) |
+						(context->cmd_buf[3] << 16) |
+						(context->cmd_buf[4] << 8) | (context->cmd_buf[5]);
+					context->blocks = (context->cmd_buf[7] << 8) | (context->cmd_buf[8]);
 					context->state = SCSI_STATE_STATUS;
+
+					if (scsi_imagecheck(context))
+					{
+						context->sensekey = SCSI_SENSEKEY_NOTREADY;
+						context->asc = SCSI_SASC_MEDIUMNOTPRESENT;
+						context->status = SCSI_STATUS_CHECKCONDITION;
+					}
+					else if (context->blocks &&
+						(context->address >= scsi_getmaxsize(context) ||
+						 context->address + context->blocks > scsi_getmaxsize(context)))
+					{
+						context->sensekey = SCSI_SENSEKEY_ILLEGALREQUEST;
+						context->asc = SCSI_SASC_LOGICALBLOCKADDRESSOUTOFRANGE;
+						context->status = SCSI_STATUS_CHECKCONDITION;
+					}
+					else if (scsi_take_deferred_write_error(context))
+					{
+						context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+						context->asc = SCSI_SASC_WRITEFAULT;
+						context->status = SCSI_STATUS_CHECKCONDITION;
+					}
+					else
+					{
+						// Read each block. The data goes nowhere - VERIFY
+						// returns no data phase - but a sector that cannot be
+						// read is exactly what the command is asked to find.
+						context->status = SCSI_STATUS_GOOD;
+						for (u32 b = 0; b < (u32)context->blocks; ++b)
+						{
+							u32 saved = context->address;
+							context->address = saved + b;
+							s32 bad = scsi_image_read(context);
+							context->address = saved;
+
+							if (bad)
+							{
+								context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+								context->asc = SCSI_SASC_UNRECOVEREDREADERROR;
+								context->status = SCSI_STATUS_CHECKCONDITION;
+								break;
+							}
+						}
+					}
 					break;
 				}
 			}

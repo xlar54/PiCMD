@@ -1538,6 +1538,25 @@ void UpdateFirmwareToSD()
 				(filInfo.fname[0] != 0);
 			f_closedir(&dir);
 
+			// Sanity check the size before going anywhere near the working
+			// kernel. Nothing here validated the source at all, so a truncated
+			// or one byte kernel.img on the stick read fine, wrote fine, and
+			// replaced a bootable machine with an unbootable one - the exact
+			// outcome the temporary-file dance was added to prevent. There is
+			// no header to check (a kernel image is raw ARM code from byte
+			// zero), but a real one is a few hundred KB, so a floor well below
+			// any genuine build and a ceiling well above one rejects the
+			// obviously wrong without guessing at content.
+			static const u32 FIRMWARE_MIN_SIZE = 64 * 1024;
+			static const u32 FIRMWARE_MAX_SIZE = 8 * 1024 * 1024;
+
+			if (found && ((u32)filInfo.fsize < FIRMWARE_MIN_SIZE || (u32)filInfo.fsize > FIRMWARE_MAX_SIZE))
+			{
+				DEBUG_LOG("firmware: %s on USB is %u bytes, not a plausible kernel - ignoring\r\n",
+					firmwareName, (u32)filInfo.fsize);
+				found = false;
+			}
+
 			if (found)
 			{
 				char* mem = (char*)malloc((u32)filInfo.fsize);
@@ -1648,7 +1667,15 @@ void UpdateFirmwareToSD()
 											{
 												if (f_rename(tempName, firmwareName) == FR_OK)
 												{
-													f_unlink(backupName);
+													// Keep kernel.bak rather than
+													// deleting it. It costs one
+													// kernel of card space and is
+													// the only way back if the new
+													// image turns out not to boot -
+													// at which point there is no
+													// working machine to fix it
+													// from. The next update
+													// replaces it.
 													updated = true;
 												}
 												else
