@@ -169,8 +169,15 @@ u8 RTC72421::Read(u8 address)
 			retval = ctrl[1];
 			break;
 		case 0xf:
-			retval = hour24 ? 2 : 0;
-			retval |= stop ? 1 : 0;
+			// These have to sit where Write puts them - bit 2 for 24 hour
+			// mode, bit 1 for stop, as the header says. The read reported them
+			// one place lower, in bits 1 and 0, so anything that set the mode
+			// and read it back got a different answer than it had written.
+			// The two bits that are not modelled (TEST and RESET) are returned
+			// as last written rather than dropped.
+			retval = ctrl[2] & 0x9;
+			retval |= hour24 ? 4 : 0;
+			retval |= stop ? 2 : 0;
 			break;
 	}
 	return retval;

@@ -531,6 +531,7 @@ void UpdateScreen()
 
 	u32 oldTrack = 0;
 	u8 oldLamps = 0xff;
+	u32 oldWriteErrors = 0;
 	u32 textColour = COLOUR_BLACK;
 	u32 bgColour = COLOUR_WHITE;
 	u32 oldTemperature = 0;
@@ -603,16 +604,25 @@ void UpdateScreen()
 		if (emulating == EMULATING_CMDHD)
 		{
 			u8 lamps = piCMDHD.LEDs;
-			if (lamps != oldLamps)
+			// The write error count belongs on this line too. A failed flush
+			// means data the computer was told had landed did not, and until
+			// now the only trace of that was a debug log nobody reads - the
+			// count existed and was displayed nowhere. It is sticky on
+			// purpose: this is the one number worth noticing after the fact.
+			u32 writeErrors = ScsiImage::WriteErrorCount();
+
+			if (lamps != oldLamps || writeErrors != oldWriteErrors)
 			{
 				oldLamps = lamps;
-				snprintf(tempBuffer, tempBufferSize, "%s %s %s %s %s %s",
+				oldWriteErrors = writeErrors;
+				snprintf(tempBuffer, tempBufferSize, "%s %s %s %s %s %s %s",
 					piCMDHD.IsActivityLEDOn() ? "ACT" : "   ",
 					piCMDHD.IsErrorLEDOn() ? "ERR" : "   ",
 					piCMDHD.IsSwap8LEDOn() ? "SW8" : "   ",
 					piCMDHD.IsSwap9LEDOn() ? "SW9" : "   ",
 					piCMDHD.IsWriteProtectLEDOn() ? "WP" : "  ",
-					piCMDHD.IsGeosLEDOn() ? "GEOS" : "    ");
+					piCMDHD.IsGeosLEDOn() ? "GEOS" : "    ",
+					writeErrors ? "WRITE FAIL" : "          ");
 				screen.PrintText(false, 0, y - screen.GetFontHeight(), tempBuffer, textColour, bgColour);
 			}
 		}
@@ -988,16 +998,39 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 		{
 			static u32 lastAccessCount = 0;
 			static u32 quietLoops = 0;
+			static u32 flushAfterLoops = 500000;		// this loop runs at 1MHz
 			u32 accessCount = ScsiImage::AccessCounter();
 			if (accessCount != lastAccessCount || IEC_Bus::IsAtnAsserted())
 			{
 				lastAccessCount = accessCount;
 				quietLoops = 0;
 			}
-			else if (++quietLoops >= 500000)		// this loop runs at 1MHz
+			else if (++quietLoops >= flushAfterLoops)
 			{
 				quietLoops = 0;
-				ScsiImage::FlushAll();		// idle window - safe to touch the card
+
+				// Idle window - safe to touch the card.
+				//
+				// Back off when it will not take the data. A card that is full
+				// or failing fails every time, and retrying twice a second
+				// freezes the emulated CPU for the length of each attempt, so
+				// the drive drops off the bus over and over for a write that
+				// is never going to land. Doubling up to a ceiling keeps the
+				// retries going without making the fault worse than the
+				// original problem.
+				static const u32 FLUSH_IDLE_LOOPS = 500000;			// ~0.5s
+				static const u32 FLUSH_MAX_LOOPS = 32000000;		// ~32s
+
+				if (ScsiImage::FlushAll() != 0)
+				{
+					flushAfterLoops <<= 1;
+					if (flushAfterLoops > FLUSH_MAX_LOOPS)
+						flushAfterLoops = FLUSH_MAX_LOOPS;
+				}
+				else
+				{
+					flushAfterLoops = FLUSH_IDLE_LOOPS;
+				}
 			}
 		}
 
@@ -1290,11 +1323,20 @@ static void LoadOptions()
 	res = f_open(&fp, "options.txt", FA_READ);
 	if (res == FR_OK)
 	{
-		u32 bytesRead;
+		u32 bytesRead = 0;
 		SetACTLed(true);
-		f_read(&fp, s_u8Memory, sizeof(s_u8Memory), &bytesRead);
+		FRESULT readRes = f_read(&fp, s_u8Memory, sizeof(s_u8Memory) - 1, &bytesRead);
 		SetACTLed(false);
 		f_close(&fp);
+
+		if (readRes != FR_OK)
+			return;
+
+		// Process walks this as a C string. The read used to be allowed to
+		// fill the buffer completely, leaving nothing to terminate it, so a
+		// large enough options.txt sent the parser off the end into whatever
+		// follows. One byte held back and a terminator written costs nothing.
+		s_u8Memory[bytesRead] = 0;
 
 		options.Process((char*)s_u8Memory);
 

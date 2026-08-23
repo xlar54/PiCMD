@@ -143,6 +143,13 @@ Options::Options(void)
 	, i2cScan(0)
 	, i2cLcdFlip(0)
 	, i2cLcdOnContrast(127)
+	// Both of these are read whether or not options.txt mentions them - the
+	// dim timer runs against i2cLcdDimTime on every pass - and neither was in
+	// this list, so they started as whatever was on the stack. Dimming to an
+	// arbitrary contrast after an arbitrary delay is a confusing thing for a
+	// display to do. 0 disables it, which is the old documented default.
+	, i2cLcdDimContrast(0)
+	, i2cLcdDimTime(0)
 	, i2cLcdUseCBMChar(0)
 	, i2cLcdModel(LCD_UNKNOWN)
 	, scrollHighlightRate(0.125f)
@@ -162,6 +169,10 @@ Options::Options(void)
 	strcpy(ROMFontName, "chargen");
 	strcpy(LcdLogoName, "1541ii");
 	ROMNameCMDHD[0] = 0;
+	// GetLCDName is called whether or not options.txt sets LCDName, and it was
+	// left uninitialised - so with no LCDName line it returned a pointer into
+	// 256 bytes of stack leftovers with no terminator guaranteed.
+	LCDName[0] = 0;
 }
 
 #define ELSE_CHECK_DECIMAL_OPTION(Name) \
