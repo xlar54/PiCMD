@@ -1110,8 +1110,13 @@ void emulator()
 				// was entered, and never update again - so after returning
 				// from CMD HD emulation (or any other exit path), the disk
 				// selection screen looks normal but nothing responds to
-				// button presses. See AGENTS.md's "File Browser Button
-				// Unresponsive After Emulation" note.
+				// button presses.
+				//
+				// Upstream Pi1541 got this for free: its browse loop called
+				// SimulateIECUpdate(), and iec_commands.cpp called
+				// ReadBrowseMode() from half a dozen places. Removing browse
+				// mode took the GPIO refresh with it, which is why the loss
+				// was not obvious in review.
 				IEC_Bus::ReadBrowseMode();
 
 				fileBrowser->Update();

@@ -359,7 +359,7 @@ public:
 		{
 			InputButton[index] = false;
 			InputButtonPrev[index] = false;
-			validInputCount[index] = 0;
+			buttonPressed[index] = false;
 			inputRepeatThreshold[index] = INPUT_BUTTON_REPEAT_THRESHOLD;
 			inputRepeat[index] = 0;
 			inputRepeatPrev[index] = 0;
@@ -401,9 +401,20 @@ public:
 	// never accumulated anywhere near 20000 *calls* and buttons appeared
 	// completely unresponsive while browsing. Using elapsed time instead
 	// makes the debounce feel the same regardless of which loop is calling
-	// it. See AGENTS.md's "File Browser Button Unresponsive After Emulation"
-	// note for how this was diagnosed.
-	static void UpdateButton(int index, unsigned gplev0)
+	// it.
+	//
+	// nowUs is passed in rather than read here: this runs once per button per
+	// call of ReadGPIOUserInput(), and in emulation mode that is the ~1MHz
+	// loop, which otherwise touches no system timer register at all. Reading
+	// ARM_SYSTIMER_CLO is an uncached peripheral access, so sampling it once
+	// for all five buttons keeps it off the per-button path - and gives every
+	// button a consistent timestamp, which is marginally more correct too.
+	//
+	// The subtraction below is deliberately unsigned: ARM_SYSTIMER_CLO is the
+	// low 32 bits of the 1MHz counter and wraps every ~71.6 minutes, and u32
+	// wraparound makes the elapsed time come out right across that boundary.
+	// It looks like a bug and is not - please leave it alone.
+	static void UpdateButton(int index, unsigned gplev0, u32 nowUs)
 	{
 		bool inputcurrent = (gplev0 & ButtonPinFlags[index]) == 0;
 
@@ -412,11 +423,13 @@ public:
 
 		if (inputcurrent)
 		{
-			if (validInputCount[index] == 0)
-				pressStartTime[index] = read32(ARM_SYSTIMER_CLO);	// start of this press streak
-			validInputCount[index]++;
+			if (!buttonPressed[index])
+			{
+				buttonPressed[index] = true;
+				pressStartTime[index] = nowUs;		// start of this press streak
+			}
 
-			u32 heldUs = read32(ARM_SYSTIMER_CLO) - pressStartTime[index];
+			u32 heldUs = nowUs - pressStartTime[index];
 
 			if (!InputButton[index] && heldUs >= INPUT_BUTTON_DEBOUNCE_THRESHOLD)
 			{
@@ -434,7 +447,7 @@ public:
 		else
 		{
 			InputButton[index] = false;
-			validInputCount[index] = 0;
+			buttonPressed[index] = false;
 			inputRepeatThreshold[index] = INPUT_BUTTON_REPEAT_THRESHOLD;
 			inputRepeat[index] = 0;
 			inputRepeatPrev[index] = 0;
@@ -705,7 +718,9 @@ private:
 	static u32 myOutsGPFSEL1;
 	static bool InputButton[5];
 	static bool InputButtonPrev[5];
-	static u32 validInputCount[5];
+	// True while the button reads pressed, so UpdateButton can tell the first
+	// call of a press streak (when pressStartTime is stamped) from the rest.
+	static bool buttonPressed[5];
 	static u32 inputRepeatThreshold[5];
 	static u32 inputRepeat[5];
 	static u32 inputRepeatPrev[5];
