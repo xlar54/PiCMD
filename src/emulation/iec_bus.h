@@ -309,13 +309,22 @@ public:
 			// This means that when any pin is turn to output it will output a 0 and pull lines low (ie an activation state on the IEC bus)
 			// Note: on the IEC bus you never output a 1 you simply tri state and it will be pulled up to a 1 (ie inactive state on the IEC bus) if no one else is pulling it low.
 
-			//myOutsGPFSEL0 = read32(ARM_GPIO_GPFSEL0);
-			//myOutsGPFSEL1 = read32(ARM_GPIO_GPFSEL1);
-
-			//myOutsGPFSEL1 |= (1 << ((PIGPIO_OUT_LED - 10) * 3));
-			//myOutsGPFSEL1 |= (1 << ((PIGPIO_OUT_SOUND - 10) * 3));
 			RPI_SetGpioPinFunction((rpi_gpio_pin_t)PIGPIO_OUT_SOUND, FS_OUTPUT);
 			RPI_SetGpioPinFunction((rpi_gpio_pin_t)PIGPIO_OUT_LED, FS_OUTPUT);
+
+			// Take a copy of GPFSEL1 now that the pin functions are set the way
+			// this build wants them.
+			//
+			// RefreshIECOutsNow rewrites the whole register on this wiring -
+			// that is how it drives DATA and CLOCK, by switching them between
+			// input and output - and it builds the new value from this copy.
+			// The copy was hard coded to 0 (the two lines above it that would
+			// have filled it in were commented out), so every refresh wrote
+			// zeroes into the function bits of GPIO 10-19 and put SOUND (13),
+			// LED (16) and the UART pins back to input, undoing the two calls
+			// immediately above. The activity LED and the sound output have
+			// therefore never worked on non split wiring.
+			myOutsGPFSEL1 = read32(ARM_GPIO_GPFSEL1);
 		}
 		else
 		{
@@ -551,6 +560,15 @@ public:
 
 		oldAssertBits = assertBits;
 		oldReleaseBits = releaseBits;
+
+		// ATN out on this wiring too, so both configurations push it at the
+		// same moment. The non split path above does it before returning, and
+		// this one used to leave it for the next periodic RefreshOutsCMDHD -
+		// so the event driven push that exists to get a change onto the wire
+		// inside the current cycle applied to DATA and CLOCK but not to ATN,
+		// for no stated reason. RefreshAtnOut only touches GPFSEL when the
+		// state actually changes, so this costs nothing when it has not.
+		RefreshAtnOut();
 	}
 
 	// Sample only DATA and CLOCK from the physical pins right now, skipping
@@ -632,8 +650,7 @@ public:
 		write32(ARM_GPIO_GPSET0, set);
 		write32(ARM_GPIO_GPCLR0, clear);
 
-		if (splitIECLines)
-			RefreshAtnOut();
+		// ATN out is handled by RefreshIECOutsNow above, on both wirings.
 	}
 
 	// The CMD HD can drive ATN itself (U10 pb6) while swapping device numbers,

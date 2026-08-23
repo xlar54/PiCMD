@@ -285,7 +285,19 @@ void InitialiseLCD()
 		screenLCD->ClearInit(0); // sh1106 needs this
 
 		bool logo_done = false;
-		if ( (height == 64) && (strcasecmp(options.GetLcdLogoName(), "1541ii") == 0) )
+		if ((height == 64) && (strcasecmp(options.GetLcdLogoName(), "cmd") == 0))
+		{
+			// No version string over this one, unlike the 1541ii logo. The
+			// artwork occupies rows 9-53 and PlotCharacter replaces whole
+			// character cells rather than compositing into them, so a line of
+			// the 8x16 font at row 0 covers rows 0-15 and takes the top off
+			// the mark. The only blank band is rows 56-63, which is half a
+			// character too short. The version is on the HDMI splash and in
+			// the no-logo fallback below.
+			screenLCD->PlotRawImage(logo_ssd_cmd, 0, 0, width, height);
+			logo_done = true;
+		}
+		else if ( (height == 64) && (strcasecmp(options.GetLcdLogoName(), "1541ii") == 0) )
 		{
 			screenLCD->PlotRawImage(logo_ssd_1541ii, 0, 0, width, height);
 			snprintf(tempBuffer, tempBufferSize, "Pi-CMD V%d.%02d", versionMajor, versionMinor);
@@ -531,6 +543,7 @@ void UpdateScreen()
 
 	u32 oldTrack = 0;
 	u8 oldLamps = 0xff;
+	u32 oldWriteErrors = 0;
 	u32 textColour = COLOUR_BLACK;
 	u32 bgColour = COLOUR_WHITE;
 	u32 oldTemperature = 0;
@@ -603,16 +616,25 @@ void UpdateScreen()
 		if (emulating == EMULATING_CMDHD)
 		{
 			u8 lamps = piCMDHD.LEDs;
-			if (lamps != oldLamps)
+			// The write error count belongs on this line too. A failed flush
+			// means data the computer was told had landed did not, and until
+			// now the only trace of that was a debug log nobody reads - the
+			// count existed and was displayed nowhere. It is sticky on
+			// purpose: this is the one number worth noticing after the fact.
+			u32 writeErrors = ScsiImage::WriteErrorCount();
+
+			if (lamps != oldLamps || writeErrors != oldWriteErrors)
 			{
 				oldLamps = lamps;
-				snprintf(tempBuffer, tempBufferSize, "%s %s %s %s %s %s",
+				oldWriteErrors = writeErrors;
+				snprintf(tempBuffer, tempBufferSize, "%s %s %s %s %s %s %s",
 					piCMDHD.IsActivityLEDOn() ? "ACT" : "   ",
 					piCMDHD.IsErrorLEDOn() ? "ERR" : "   ",
 					piCMDHD.IsSwap8LEDOn() ? "SW8" : "   ",
 					piCMDHD.IsSwap9LEDOn() ? "SW9" : "   ",
 					piCMDHD.IsWriteProtectLEDOn() ? "WP" : "  ",
-					piCMDHD.IsGeosLEDOn() ? "GEOS" : "    ");
+					piCMDHD.IsGeosLEDOn() ? "GEOS" : "    ",
+					writeErrors ? "WRITE FAIL" : "          ");
 				screen.PrintText(false, 0, y - screen.GetFontHeight(), tempBuffer, textColour, bgColour);
 			}
 		}
@@ -929,6 +951,17 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 	unsigned ctAfter = 0;
 	int resetCount = 0;
 
+	// Idle flush state. Locals rather than statics inside the loop: they used
+	// to persist across calls, so a failing image that had backed the retry
+	// off to half a minute handed that delay to whatever was mounted next -
+	// and a healthy image would then sit on acknowledged writes for thirty
+	// seconds before its first flush, for a fault that was not its own.
+	static const u32 FLUSH_IDLE_LOOPS = 500000;			// ~0.5s at this loop's 1MHz
+	static const u32 FLUSH_MAX_LOOPS = 32000000;		// ~32s
+	u32 lastAccessCount = 0;
+	u32 quietLoops = 0;
+	u32 flushAfterLoops = FLUSH_IDLE_LOOPS;
+
 	unsigned buttonSwap8 = options.GetCMDHDButtonSwap8();
 	unsigned buttonSwap9 = options.GetCMDHDButtonSwap9();
 	unsigned buttonWP = options.GetCMDHDButtonWP();
@@ -986,18 +1019,35 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 		// away. Doing this on a timer instead landed it between SCSI commands,
 		// which is the worst possible moment.
 		{
-			static u32 lastAccessCount = 0;
-			static u32 quietLoops = 0;
 			u32 accessCount = ScsiImage::AccessCounter();
 			if (accessCount != lastAccessCount || IEC_Bus::IsAtnAsserted())
 			{
 				lastAccessCount = accessCount;
 				quietLoops = 0;
 			}
-			else if (++quietLoops >= 500000)		// this loop runs at 1MHz
+			else if (++quietLoops >= flushAfterLoops)
 			{
 				quietLoops = 0;
-				ScsiImage::FlushAll();		// idle window - safe to touch the card
+
+				// Idle window - safe to touch the card.
+				//
+				// Back off when it will not take the data. A card that is full
+				// or failing fails every time, and retrying twice a second
+				// freezes the emulated CPU for the length of each attempt, so
+				// the drive drops off the bus over and over for a write that
+				// is never going to land. Doubling up to a ceiling keeps the
+				// retries going without making the fault worse than the
+				// original problem.
+				if (ScsiImage::FlushAll() != 0)
+				{
+					flushAfterLoops <<= 1;
+					if (flushAfterLoops > FLUSH_MAX_LOOPS)
+						flushAfterLoops = FLUSH_MAX_LOOPS;
+				}
+				else
+				{
+					flushAfterLoops = FLUSH_IDLE_LOOPS;
+				}
 			}
 		}
 
@@ -1290,11 +1340,20 @@ static void LoadOptions()
 	res = f_open(&fp, "options.txt", FA_READ);
 	if (res == FR_OK)
 	{
-		u32 bytesRead;
+		u32 bytesRead = 0;
 		SetACTLed(true);
-		f_read(&fp, s_u8Memory, sizeof(s_u8Memory), &bytesRead);
+		FRESULT readRes = f_read(&fp, s_u8Memory, sizeof(s_u8Memory) - 1, &bytesRead);
 		SetACTLed(false);
 		f_close(&fp);
+
+		if (readRes != FR_OK)
+			return;
+
+		// Process walks this as a C string. The read used to be allowed to
+		// fill the buffer completely, leaving nothing to terminate it, so a
+		// large enough options.txt sent the parser off the end into whatever
+		// follows. One byte held back and a terminator written costs nothing.
+		s_u8Memory[bytesRead] = 0;
 
 		options.Process((char*)s_u8Memory);
 

@@ -116,8 +116,9 @@ LCDName = ssd1306_128x64
 // The panel is monochrome, so a lit lamp is drawn as an inverse video block.
 CMDHDLcdLamps = 1
 
-// Splash image on the LCD at boot: 1541ii, 1541classic, or a PNG on the card.
-//LCDLogoName = 1541ii
+// Splash image on the LCD at boot: cmd (default), 1541ii, 1541classic,
+// or a raw 128x64 SSD1306 image on the card.
+//LCDLogoName = cmd
 
 // Scan the I2C bus at boot and list the addresses found, on the HDMI screen.
 // Only needed while getting a display working.
