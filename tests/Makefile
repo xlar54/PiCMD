@@ -36,7 +36,7 @@ endif
 UNDER_TEST = $(SRCDIR)/emulation/scsi.cpp
 
 TEST_SRCS  = main.cpp harness.cpp \
-             test_scsi_cache.cpp \
+             test_scsi_cache.cpp test_scsi_physical_read.cpp \
              $(SHIMS)/ff.cpp $(SHIMS)/fakeclock.cpp $(SHIMS)/debug.cpp
 
 TARGET     = run_tests
