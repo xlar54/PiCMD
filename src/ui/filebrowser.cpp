@@ -253,6 +253,12 @@ void FileBrowser::BrowsableListView::RefreshHighlightScroll()
 bool FileBrowser::BrowsableListView::CheckBrowseNavigation(bool pageOnly)
 {
 	bool dirty = false;
+	// An empty list makes size() - 1 wrap to 4294967295, and every bound
+	// below is then satisfied. A directory that failed to open, or a card
+	// pulled mid browse, is enough to get here.
+	if (list->entries.size() == 0)
+		return false;
+
 	u32 numberOfEntriesMinus1 = list->entries.size() - 1;
 
 	if (inputMappings->BrowseDown())
@@ -391,6 +397,10 @@ void FileBrowser::BrowsableList::RefreshViewsHighlightScroll()
 
 bool FileBrowser::BrowsableList::CheckBrowseNavigation()
 {
+	// See the view version above: size() - 1 wraps on an empty list.
+	if (entries.size() == 0)
+		return false;
+
 	u32 numberOfEntriesMinus1 = entries.size() - 1;
 
 	bool dirty = false;
@@ -654,8 +664,20 @@ void FileBrowser::RefreshFolderEntries()
 			do
 			{
 				res = f_readdir(&dir, &entry.filImage);
-				ext = strrchr(entry.filImage.fname, '.');
-				if (res == FR_OK && entry.filImage.fname[0] != 0 && !(ext && strcasecmp(ext, ".png") == 0) && (entry.filImage.fname[0] != '.'))
+
+				// List directories, and files this drive can actually mount.
+				//
+				// Everything used to be listed except .png and dotfiles, which
+				// meant the root of a working card showed cmdhd-bootrom.bin,
+				// bootcode.bin, start.elf, fixup.dat, config.txt, options.txt
+				// and the README alongside the images. None of it was ever
+				// selectable - every selection path already requires
+				// IsDiskImageExtention - so it was noise you had to scroll
+				// past to reach the disks.
+				bool isDir = (entry.filImage.fattrib & AM_DIR) != 0;
+				bool mountable = isDir || IsDiskImageExtention(entry.filImage.fname);
+
+				if (res == FR_OK && entry.filImage.fname[0] != 0 && entry.filImage.fname[0] != '.' && mountable)
 					folder.entries.push_back(entry);
 			} while (res == FR_OK && entry.filImage.fname[0] != 0);
 			f_closedir(&dir);
@@ -838,7 +860,15 @@ bool FileBrowser::CheckForPNG(const char* filename, FILINFO& filIcon)
 		char* ptr = strrchr(filename, '.');
 		if (ptr)
 		{
+			// A name can be up to _MAX_LFN (255) characters, so the stem plus
+			// ".png" plus a terminator does not necessarily fit in 256. Leave
+			// room for the extension rather than running off the end of the
+			// buffer in strcat.
+			static const int EXT_LEN = 4;			// ".png"
 			int len = ptr - filename;
+			if (len > (int)sizeof(fileName) - EXT_LEN - 1)
+				len = (int)sizeof(fileName) - EXT_LEN - 1;
+
 			strncpy(fileName, filename, len);
 			fileName[len] = 0;
 
@@ -864,30 +894,44 @@ void FileBrowser::DisplayPNG(FILINFO& filIcon, int x, int y)
 			char* PNG = (char*)malloc(filIcon.fsize);
 			if (PNG)
 			{
-				u32 bytesRead;
+				u32 bytesRead = 0;
 				SetACTLed(true);
-				f_read(&fp, PNG, filIcon.fsize, &bytesRead);
+				FRESULT readRes = f_read(&fp, PNG, filIcon.fsize, &bytesRead);
 				SetACTLed(false);
-				f_close(&fp);
 
-				int w;
-				int h;
-				int channels_in_file;
-				stbi_uc* image = stbi_load_from_memory((stbi_uc const*)PNG, bytesRead, &w, &h, &channels_in_file, 4);
+				if (readRes == FR_OK)
+				{
+					int w;
+					int h;
+					int channels_in_file;
+					stbi_uc* image = stbi_load_from_memory((stbi_uc const*)PNG, bytesRead, &w, &h, &channels_in_file, 4);
 #if not defined(EXPERIMENTALZERO)
 
-				if (image && (w == PNG_WIDTH && h == PNG_HEIGHT))
-				{
-					//DEBUG_LOG("Opened PNG %s w = %d h = %d cif = %d\r\n", fileName, w, h, channels_in_file);
-					screenMain->PlotImage((u32*)image, x, y, w, h);
-				}
-				else
-				{
-					//DEBUG_LOG("Invalid PNG size %d x %d\r\n", w, h);
-				}
+					if (image && (w == PNG_WIDTH && h == PNG_HEIGHT))
+					{
+						//DEBUG_LOG("Opened PNG %s w = %d h = %d cif = %d\r\n", fileName, w, h, channels_in_file);
+						screenMain->PlotImage((u32*)image, x, y, w, h);
+					}
+					else
+					{
+						//DEBUG_LOG("Invalid PNG size %d x %d\r\n", w, h);
+					}
 #endif
+					// stb allocates the decoded image and hands ownership over.
+					// This was never released, so every icon drawn - and they
+					// are redrawn as the highlight moves - leaked 320x200x4,
+					// a quarter megabyte a time, out of a heap that is never
+					// coming back on a bare metal machine.
+					if (image)
+						stbi_image_free(image);
+				}
+
 				free(PNG);
 			}
+
+			// Outside the malloc check: an allocation failure used to leave
+			// the file open, and FatFS only has so many handles.
+			f_close(&fp);
 		}
 	}
 	else
@@ -957,8 +1001,9 @@ void FileBrowser::PopFolder()
 			unsigned found = 0;
 			if (last_ptr)
 			{
-				u32 numberOfEntriesMinus1 = folder.entries.size() - 1;
-				for (unsigned i = 0; i <= numberOfEntriesMinus1; i++)
+				// Counted with < size() rather than <= size() - 1: the old form
+				// looped four billion times over an empty folder.
+				for (unsigned i = 0; i < folder.entries.size(); i++)
 				{
 					FileBrowser::BrowsableList::Entry* entry = &folder.entries[i];
 					if (strcmp(last_ptr, entry->filImage.fname) == 0)
@@ -1123,7 +1168,8 @@ bool FileBrowser::AddToCaddy(FileBrowser::BrowsableList::Entry* current)
 		for (unsigned i = 0; i < folder.entries.size(); ++i)
 			ret |= AddImageToCaddy(&folder.entries[i]);
 
-		folder.currentIndex = folder.entries.size() - 1;
+		// Nothing was added if the folder is empty; size() - 1 would wrap.
+		folder.currentIndex = folder.entries.size() ? folder.entries.size() - 1 : 0;
 		folder.SetCurrent();
 
 		RefeshDisplay();

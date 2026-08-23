@@ -46,6 +46,13 @@ public:
 	{
 	}
 
+	// The class has virtual methods and is deleted through derived pointers,
+	// which is enough for -Wdelete-non-virtual-dtor. It happens to be safe
+	// today because every delete uses the exact derived type, but that is a
+	// property of the call sites rather than of the class, and ScreenLCD owns
+	// an SSD1306 that has to be released.
+	virtual ~ScreenBase() {}
+
 	virtual void DrawRectangle(u32 x1, u32 y1, u32 x2, u32 y2, RGBA colour) = 0;
 	virtual void Clear(RGBA colour) = 0;
 

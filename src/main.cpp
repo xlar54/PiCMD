@@ -269,7 +269,18 @@ void InitialiseLCD()
 		if (i2cLcdModel == LCD_1306_128x32)
 			height = 32;
 		screenLCD = new ScreenLCD();
-		screenLCD->Open(width, height, 1, i2cBusMaster, i2cLcdAddress, i2cLcdFlip, i2cLcdModel, i2cLcdUseCBMChar);
+		// new is noexcept in this build and returns malloc's result, so it can
+		// hand back null instead of throwing.
+		if (!screenLCD || !screenLCD->Open(width, height, 1, i2cBusMaster, i2cLcdAddress, i2cLcdFlip, i2cLcdModel, i2cLcdUseCBMChar))
+		{
+			// No panel. Everything downstream tests screenLCD for null and
+			// carries on without one, so this costs the display and nothing
+			// else - which beats dying on the first PrintText.
+			DEBUG_LOG("LCD: could not open display, continuing without it\r\n");
+			delete screenLCD;
+			screenLCD = 0;
+			return;
+		}
 		screenLCD->SetContrast(i2cLcdOnContrast);
 		screenLCD->ClearInit(0); // sh1106 needs this
 
@@ -412,8 +423,13 @@ static void UpdateLCDLamps(void)
 	if (rows == 0)
 		return;
 
+	// The first four lamps get a full width field; the last three share the
+	// bottom row as short tags, because three names will not fit across
+	// sixteen characters. Only the first four therefore have a wide form.
+	static const u32 WIDE_LAMPS = 4;
+
 	bool on[7];
-	const char* wide[7];
+	const char* wide[WIDE_LAMPS];
 	const char* narrow[7];
 
 	on[0] = true;								// POWER - the drive is running
@@ -428,9 +444,9 @@ static void UpdateLCDLamps(void)
 	wide[1] = "ACTIVE";  narrow[1] = "ACT";
 	wide[2] = "ERROR";   narrow[2] = "ERR";
 	wide[3] = "WR PROT"; narrow[3] = "WP";
-	wide[4] = "DRIVE 8"; narrow[4] = "D8";
-	wide[5] = "DRIVE 9"; narrow[5] = "D9";
-	wide[6] = "GEOS";    narrow[6] = "GEOS";
+	                     narrow[4] = "D8";
+	                     narrow[5] = "D9";
+	                     narrow[6] = "GEOS";
 
 	core0RefreshingScreen.Acquire();
 	IEC_Bus::WaitMicroSeconds(100);
@@ -447,6 +463,14 @@ static void UpdateLCDLamps(void)
 			screenLCD->PrintText(false, (i & 1) ? 8 * 8 : 0, (i >> 1) * fontHeight,
 				tempBuffer, 0, on[i] ? RGBA(0xff, 0xff, 0xff, 0xff) : 0);
 		}
+
+		// Three four character tags cover columns 0-11 of a sixteen column
+		// row, so blank the row first - otherwise columns 12-15 keep the
+		// browser or logo pixels that were there when emulation started,
+		// and nothing ever clears them because this function returns early
+		// whenever the lamp state is unchanged.
+		snprintf(tempBuffer, tempBufferSize, "%-16s", "");
+		screenLCD->PrintText(false, 0, 2 * fontHeight, tempBuffer, 0, 0);
 
 		for (int i = 4; i < 7; ++i)
 		{
@@ -466,6 +490,14 @@ static void UpdateLCDLamps(void)
 			screenLCD->PrintText(false, i * 4 * 8, 0,
 				tempBuffer, 0, on[i] ? RGBA(0xff, 0xff, 0xff, 0xff) : 0);
 		}
+
+		// Three four character tags cover columns 0-11 of a sixteen column
+		// row, so blank the row first - otherwise columns 12-15 keep the
+		// browser or logo pixels that were there when emulation started,
+		// and nothing ever clears them because this function returns early
+		// whenever the lamp state is unchanged.
+		snprintf(tempBuffer, tempBufferSize, "%-16s", "");
+		screenLCD->PrintText(false, 0, fontHeight, tempBuffer, 0, 0);
 
 		for (int i = 4; i < 7; ++i)
 		{
@@ -1238,7 +1270,12 @@ static void DisplayLogo()
 	int channels_in_file;
 	stbi_uc* image = stbi_load_from_memory((stbi_uc const*)I__logo_png, I__logo_png_size, &w, &h, &channels_in_file, 0);
 
-	screen.PlotImage((u32*)image, 0, 0, w, h);
+	// A failed decode returns null, and PlotImage would walk it.
+	if (image)
+	{
+		screen.PlotImage((u32*)image, 0, 0, w, h);
+		stbi_image_free(image);
+	}
 
 	snprintf(tempBuffer, tempBufferSize, "V%d.%02d", versionMajor, versionMinor);
 	screen.PrintText(false, 20, 180, tempBuffer, FileBrowser::Colour(VIC2_COLOUR_INDEX_BLUE));
