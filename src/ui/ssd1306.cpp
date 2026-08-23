@@ -118,10 +118,17 @@ void SSD1306::SendData(u8 data)
 	RPI_I2CWrite(BSCMaster, address, buffer, sizeof(buffer));
 }
 
-//We can send up to 16 bytes to the i2c bus
+// We can send up to 16 bytes to the i2c bus: one control byte plus fifteen of
+// data. The buffer has to be sixteen for that - it was fifteen, so a full
+// length 15 transfer wrote buffer[15] one past the end and then handed
+// RPI_I2CWrite a 16 byte count over a 15 byte buffer. That happened on any
+// display refresh with a run of 15 or more changed bytes.
 void SSD1306::SendDataLong(void* data, u8 length)
 {
-	char buffer[15];
+	char buffer[16];
+
+	if (length > sizeof(buffer) - 1)
+		length = sizeof(buffer) - 1;
 
 	buffer[0] = SSD1306_DATA_REG;
 	memcpy(&buffer[1], data, length);

@@ -189,6 +189,15 @@ void Options::Process(char* buffer)
 		/*char* equals = */GetToken();
 		char* pValue = GetToken();
 
+		// GetToken returns 0 at the end of the buffer, so a key with no value
+		// - a truncated file, or a trailing "Font =" - leaves pValue null. The
+		// decimal and float macros survive that because GetDecimal/GetFloat
+		// null-check, but the string options went straight into strncpy and
+		// took the Pi down at boot, before anything is on screen to say why.
+		// An option with no value is simply skipped.
+		if (!pValue)
+			continue;
+
 		if ((strcasecmp(pOption, "Font") == 0) || (strcasecmp(pOption, "ChargenFont") == 0))
 		{
 			strncpy(ROMFontName, pValue, 255);

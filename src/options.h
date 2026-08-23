@@ -89,18 +89,42 @@ public:
 
 	inline float ScrollHighlightRate() const { return scrollHighlightRate; }
 
-	inline unsigned int GetButtonEnter() const { return buttonEnter - 1; }
-	inline unsigned int GetButtonUp() const { return buttonUp - 1; }
-	inline unsigned int GetButtonDown() const { return buttonDown - 1; }
-	inline unsigned int GetButtonBack() const { return buttonBack - 1; }
-	inline unsigned int GetButtonInsert() const { return buttonInsert - 1; }
+	// options.txt numbers the buttons 1-5; the arrays behind them are indexed
+	// from 0, hence the -1. An out of range value used to sail straight
+	// through: "buttonEnter = 0" gave 0u - 1 = 0xFFFFFFFF, truncated to 255
+	// when stored in a u8, and inputmappings then read 250 elements past the
+	// end of IEC_Bus's five element arrays.
+	//
+	// The two families need different handling. The CMD HD buttons are always
+	// tested with "< 5" before use, so out of range can map to a sentinel that
+	// disables the function - which is what options.txt already documents 0 to
+	// mean. The browser buttons are stored as u8 and indexed unguarded, so
+	// there is no disabled state available: they fall back to their default
+	// instead, which at least leaves the browser usable.
+	static const unsigned int BUTTON_DISABLED = 0xFFFFFFFF;
+
+	static inline unsigned int ButtonIndex(unsigned int n)
+	{
+		return (n >= 1 && n <= 5) ? n - 1 : BUTTON_DISABLED;
+	}
+
+	static inline unsigned int BrowserButtonIndex(unsigned int n, unsigned int fallback)
+	{
+		return (n >= 1 && n <= 5) ? n - 1 : fallback - 1;
+	}
+
+	inline unsigned int GetButtonEnter() const { return BrowserButtonIndex(buttonEnter, 1); }
+	inline unsigned int GetButtonUp() const { return BrowserButtonIndex(buttonUp, 2); }
+	inline unsigned int GetButtonDown() const { return BrowserButtonIndex(buttonDown, 3); }
+	inline unsigned int GetButtonBack() const { return BrowserButtonIndex(buttonBack, 4); }
+	inline unsigned int GetButtonInsert() const { return BrowserButtonIndex(buttonInsert, 5); }
 
 	// CMD HD front panel buttons (1-5 in options.txt, 0 = function disabled)
-	inline unsigned int GetCMDHDButtonSwap8() const { return CMDHDButtonSwap8 - 1; }
-	inline unsigned int GetCMDHDButtonSwap9() const { return CMDHDButtonSwap9 - 1; }
-	inline unsigned int GetCMDHDButtonWP() const { return CMDHDButtonWP - 1; }
-	inline unsigned int GetCMDHDButtonReset() const { return CMDHDButtonReset - 1; }
-	inline unsigned int GetCMDHDButtonExit() const { return CMDHDButtonExit - 1; }
+	inline unsigned int GetCMDHDButtonSwap8() const { return ButtonIndex(CMDHDButtonSwap8); }
+	inline unsigned int GetCMDHDButtonSwap9() const { return ButtonIndex(CMDHDButtonSwap9); }
+	inline unsigned int GetCMDHDButtonWP() const { return ButtonIndex(CMDHDButtonWP); }
+	inline unsigned int GetCMDHDButtonReset() const { return ButtonIndex(CMDHDButtonReset); }
+	inline unsigned int GetCMDHDButtonExit() const { return ButtonIndex(CMDHDButtonExit); }
 
 
 	// Page up and down will jump a different amount based on the maximum number rows displayed.

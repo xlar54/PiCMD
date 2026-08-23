@@ -529,6 +529,7 @@ FileBrowser::FileBrowser(InputMappings* inputMappings, const char* romName, bool
 {
 	selectedDHDPath[0] = 0;
 	selectedDHDReadOnly = false;
+	lastSelectionName = 0;
 
 	folder.scrollHighlightRate = scrollHighlightRate;
 
@@ -1095,7 +1096,10 @@ void FileBrowser::DisplayDHDInfo(const char* imagePath, u32 sizeInSectors, const
 	{
 		RGBA BkColour = RGBA(0, 0, 0, 0xFF);
 		screenLCD->Clear(BkColour);
-		screenLCD->PrintText(false, 0, 0, (char*)filenameForIcon, RGBA(0xff, 0xff, 0xff, 0xff), BkColour);
+		// Belt and braces: callers should always pass a name, but this is the
+		// one place a stray pointer would be walked as a string.
+		if (filenameForIcon)
+			screenLCD->PrintText(false, 0, 0, (char*)filenameForIcon, RGBA(0xff, 0xff, 0xff, 0xff), BkColour);
 		screenLCD->SwapBuffers();
 	}
 }
@@ -1352,6 +1356,11 @@ void FileBrowser::SelectAutoMountImage(const char* image)
 	{
 		ClearSelections();
 		caddySelections.entries.push_back(*current);
+		// Has to be set here as well as on the manual path: this makes
+		// selectionsMade true, and the browser loop then hands
+		// LastSelectionName() to BeginEmulating for the icon lookup. Without
+		// it that pointer was whatever the member happened to contain.
+		lastSelectionName = current->filImage.fname;
 		selectionsMade = FillCaddyWithSelections();
 	}
 }
