@@ -35,7 +35,7 @@
 u8* ScsiImage::cachePool = 0;
 ScsiImage::CacheSlot* ScsiImage::cacheSlots = 0;
 u32 ScsiImage::numCacheSlots = 0;
-u8 ScsiImage::nextImageId = 0;
+u32 ScsiImage::nextImageId = 0;
 
 void ScsiImage::InitCache(u32 sizeInBytes)
 {
@@ -107,8 +107,22 @@ void ScsiImage::Detach()
 {
 	if (attached)
 	{
-		Sync(true);
-		f_close(&file);
+		// One retry, because the usual cause of a first failure is a transient
+		// card problem. After that the file has to be closed regardless - there
+		// is nowhere else for the data to go - so all that is left is to say so
+		// loudly rather than invalidate the slots as if nothing happened.
+		//
+		// The report only counts; it must not flush again, or the diagnostic
+		// becomes a third write attempt and can report zero after succeeding.
+		if (Sync(true) < 0 && Sync(true) < 0)
+			DEBUG_LOG("SCSI: '%s' detached with unwritten data - DATA LOST\r\n", name);
+		else if (HasDirtyChunks())
+			DEBUG_LOG("SCSI: '%s' detached with chunks still dirty - DATA LOST\r\n", name);
+
+		// f_close writes the directory entry, so it is the last chance for
+		// anything to go wrong and worth reporting too.
+		if (f_close(&file) != FR_OK)
+			DEBUG_LOG("SCSI: closing '%s' failed - the file may be truncated\r\n", name);
 		attached = false;
 
 		for (u32 i = 0; i < numAttachedImages; ++i)
@@ -130,7 +144,7 @@ void ScsiImage::Detach()
 	}
 }
 
-int ScsiImage::Sync(bool force)
+int ScsiImage::Sync(bool force, u32 deadline)
 {
 	if (!attached || !needSync)
 		return 0;
@@ -145,11 +159,19 @@ int ScsiImage::Sync(bool force)
 	if (!force)
 		return 0;
 
-	int failed = FlushAllDirty();
+	int failed = FlushAllDirty(deadline);
+
+	// Partial means "there is still dirty data", not "the budget was reached".
+	// Those differ when the budget lands exactly on the last chunk, and
+	// treating that as partial would skip f_sync and leave needSync set on a
+	// cache that is in fact clean.
+	bool partial = HasDirtyChunks();
 
 	// f_sync pushes FatFS's own metadata (the directory entry and FAT chain).
-	// Losing that loses the file, not just the sectors, so it counts too.
-	if (f_sync(&file) != FR_OK)
+	// Losing that loses the file, not just the sectors, so it counts too. Skip
+	// it on a partial pass: there is more to write, and this is the expensive
+	// part of a budgeted flush.
+	if (!partial && f_sync(&file) != FR_OK)
 		++failed;
 
 	if (failed)
@@ -162,8 +184,36 @@ int ScsiImage::Sync(bool force)
 		return -1;
 	}
 
-	needSync = false;
-	return 0;
+	// Only clean if everything actually went out.
+	if (!partial)
+		needSync = false;
+	return partial ? 1 : 0;
+}
+
+// Write a slot's dirty sectors back so it can be reused. Returns false if the
+// data could not be written and the slot must therefore be left alone.
+bool ScsiImage::EvictSlot(CacheSlot* victim)
+{
+	ScsiImage* owner = ImageById(victim->image);
+	if (!owner)
+	{
+		// The image was detached without this chunk being written. Nothing can
+		// write it now - the FIL is closed - so it is already lost; say so
+		// rather than quietly reusing the slot.
+		DEBUG_LOG("SCSI: dirty chunk for detached image %u dropped\r\n", victim->image);
+		++writeErrors;
+		victim->dirtyMask = 0;
+		return true;
+	}
+
+	if (owner->FlushChunk(*victim) != 0)
+	{
+		owner->writeErrorPending = true;
+		++writeErrors;
+		return false;
+	}
+
+	return true;
 }
 
 ScsiImage::CacheSlot* ScsiImage::FindSlot(u32 chunkIndex, bool allocate)
@@ -185,17 +235,31 @@ ScsiImage::CacheSlot* ScsiImage::FindSlot(u32 chunkIndex, bool allocate)
 	if (!allocate)
 		return 0;
 
-	// Prefer replacing an invalid slot.
-	CacheSlot* victim = slot->valid ? (slot2->valid ? slot : slot2) : slot;
+	// Invalid first, then clean, then dirty. Evicting a dirty slot means going
+	// to the card from inside a SCSI command - the thing this whole design
+	// exists to avoid - so a clean slot is worth taking even when the other
+	// way would be the more natural victim.
+	CacheSlot* victim;
+	if (!slot->valid)			victim = slot;
+	else if (!slot2->valid)		victim = slot2;
+	else if (!slot->dirtyMask)	victim = slot;
+	else if (!slot2->dirtyMask)	victim = slot2;
+	else						victim = slot;		// both dirty; one has to go
 
 	// Never drop writes on the floor. The chunk being evicted may belong to
 	// another image, so flush it through whoever owns it.
-	if (victim->valid && victim->dirtyMask)
+	//
+	// If it cannot be written - card full, card gone, or the owning image has
+	// been detached - the data must not be evicted, because the cache is the
+	// only copy. Try the other way of the set, and if that is unwritable too,
+	// refuse to allocate. WriteSector then falls back to writing straight
+	// through, which is slow but reports its own failure honestly.
+	if (victim->valid && victim->dirtyMask && !EvictSlot(victim))
 	{
-		ScsiImage* owner = ImageById(victim->image);
-		if (owner)
-			owner->FlushChunk(*victim);
-		victim->dirtyMask = 0;
+		CacheSlot* other = (victim == slot) ? slot2 : slot;
+		if (other == victim || (other->valid && other->dirtyMask && !EvictSlot(other)))
+			return 0;
+		victim = other;
 	}
 
 	victim->valid = 0;
@@ -212,16 +276,23 @@ u32 ScsiImage::worstStallMicros = 0;
 u32 ScsiImage::accessCounter = 0;
 u32 ScsiImage::writeErrors = 0;
 
-int ScsiImage::FlushAll()
+int ScsiImage::FlushSome(u32 maxMicros)
 {
 	int failed = 0;
 
+	// One deadline for the whole call, so the bound holds however many images
+	// are mounted rather than being per image.
+	u32 deadline = maxMicros ? (read32(ARM_SYSTIMER_CLO) + maxMicros) : 0;
+
 	for (u32 i = 0; i < numAttachedImages; ++i)
 	{
+		if (deadline && (s32)(read32(ARM_SYSTIMER_CLO) - deadline) >= 0)
+			break;
+
 		ScsiImage* img = attachedImages[i];
 		if (img && img->attached && img->needSync)
 		{
-			if (img->Sync(true) != 0)
+			if (img->Sync(true, deadline) < 0)
 				++failed;
 		}
 	}
@@ -229,7 +300,12 @@ int ScsiImage::FlushAll()
 	return failed;
 }
 
-ScsiImage* ScsiImage::ImageById(u8 id)
+int ScsiImage::FlushAll()
+{
+	return FlushSome(0);
+}
+
+ScsiImage* ScsiImage::ImageById(u32 id)
 {
 	for (u32 i = 0; i < numAttachedImages; ++i)
 	{
@@ -350,10 +426,16 @@ int ScsiImage::ReadSectorUncached(u32 lba, u8* buffer)
 
 	// If the sector happens to be cached, take it from there - but never fill
 	// the cache on its account.
+	//
+	// validMask has to be checked, not just valid: a slot created by writing
+	// one sector holds nothing but uninitialised RAM for the other seven, and
+	// handing that back as disk contents is how the base LBA scan ends up
+	// finding a CMD signature that was never on the card.
+	u32 sectorInChunk = lba % SECTORS_PER_CHUNK;
 	CacheSlot* slot = FindSlot(lba / SECTORS_PER_CHUNK, false);
-	if (slot && slot->valid)
+	if (slot && slot->valid && (slot->validMask & (1 << sectorInChunk)))
 	{
-		memcpy(buffer, slot->data + (lba % SECTORS_PER_CHUNK) * SECTOR_SIZE, SECTOR_SIZE);
+		memcpy(buffer, slot->data + sectorInChunk * SECTOR_SIZE, SECTOR_SIZE);
 		return 0;
 	}
 
@@ -417,7 +499,13 @@ int ScsiImage::WriteSector(u32 lba, const u8* buffer)
 
 // Push a chunk's dirty sectors out to the card, in as few writes as the
 // runs of set bits allow.
-int ScsiImage::FlushChunk(CacheSlot& slot)
+//
+// deadline (0 for none) is checked between runs, so a budgeted flush can stop
+// part way through a chunk. That is safe because only the bits that actually
+// reached the card are cleared - what is left simply stays dirty. Eviction
+// passes no deadline: it needs the whole chunk out before it can reuse the
+// slot.
+int ScsiImage::FlushChunk(CacheSlot& slot, u32 deadline)
 {
 	if (!slot.valid || !slot.dirtyMask)
 		return 0;
@@ -426,6 +514,9 @@ int ScsiImage::FlushChunk(CacheSlot& slot)
 	while (s < SECTORS_PER_CHUNK)
 	{
 		if (!(slot.dirtyMask & (1 << s))) { ++s; continue; }
+
+		if (deadline && (s32)(read32(ARM_SYSTIMER_CLO) - deadline) >= 0)
+			return 0;
 
 		u32 run = 1;
 		while (s + run < SECTORS_PER_CHUNK && (slot.dirtyMask & (1 << (s + run))))
@@ -454,21 +545,42 @@ int ScsiImage::FlushChunk(CacheSlot& slot)
 	return 0;
 }
 
-int ScsiImage::FlushAllDirty()
+int ScsiImage::FlushAllDirty(u32 deadline)
 {
 	int failed = 0;
 
 	for (u32 i = 0; i < numCacheSlots; ++i)
 	{
+		// Budget in real time, not in chunks. A chunk is up to four separate
+		// writes when its dirty sectors are not contiguous, so counting chunks
+		// bounds the work by a factor of four at best. An absolute deadline
+		// also shares itself across images for free.
+		//
+		// Signed difference so it stays correct across the timer's ~71.6
+		// minute wrap.
+		if (deadline && (s32)(read32(ARM_SYSTIMER_CLO) - deadline) >= 0)
+			break;
+
 		if (cacheSlots[i].valid && cacheSlots[i].dirtyMask && cacheSlots[i].image == imageId)
 		{
-			if (FlushChunk(cacheSlots[i]) != 0)
+			if (FlushChunk(cacheSlots[i], deadline) != 0)
 				++failed;
 		}
 	}
 
 	return failed;
 }
+
+bool ScsiImage::HasDirtyChunks() const
+{
+	for (u32 i = 0; i < numCacheSlots; ++i)
+	{
+		if (cacheSlots[i].valid && cacheSlots[i].dirtyMask && cacheSlots[i].image == imageId)
+			return true;
+	}
+	return false;
+}
+
 
 ///////////////////////////////////////////////////////////////////////////////
 // SCSI target state machine (from VICE scsi.c).
