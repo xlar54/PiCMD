@@ -86,6 +86,12 @@ public:
 	// The budget is time rather than chunks because a chunk is up to four
 	// separate writes when its dirty sectors are not contiguous, so a chunk
 	// count bounds the work only to within a factor of four.
+	//
+	// It is a SOFT budget. The deadline is tested before each write, and a
+	// write in progress cannot be abandoned, so a call can overrun by one
+	// access - 35ms at the worst rate measured here. A pass that empties the
+	// cache also ends with f_sync, which is another. Treat maxMicros as "stop
+	// starting new work after this", not as a hard ceiling.
 	static int FlushSome(u32 maxMicros);
 
 	// Quarter of a second: unnoticeable on top of the host's own reset, and
@@ -149,7 +155,7 @@ private:
 	// something else, and by Sync.
 	// Both return 0 on success. A chunk that fails keeps its dirty bits so the
 	// next flush tries again rather than dropping the data on the floor.
-	int FlushChunk(CacheSlot& slot);
+	int FlushChunk(CacheSlot& slot, u32 deadline = 0);
 	int FlushAllDirty(u32 deadline = 0);
 
 	// Whether this image still has chunks waiting to be written. Read only -

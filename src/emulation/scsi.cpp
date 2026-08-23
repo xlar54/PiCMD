@@ -499,7 +499,13 @@ int ScsiImage::WriteSector(u32 lba, const u8* buffer)
 
 // Push a chunk's dirty sectors out to the card, in as few writes as the
 // runs of set bits allow.
-int ScsiImage::FlushChunk(CacheSlot& slot)
+//
+// deadline (0 for none) is checked between runs, so a budgeted flush can stop
+// part way through a chunk. That is safe because only the bits that actually
+// reached the card are cleared - what is left simply stays dirty. Eviction
+// passes no deadline: it needs the whole chunk out before it can reuse the
+// slot.
+int ScsiImage::FlushChunk(CacheSlot& slot, u32 deadline)
 {
 	if (!slot.valid || !slot.dirtyMask)
 		return 0;
@@ -508,6 +514,9 @@ int ScsiImage::FlushChunk(CacheSlot& slot)
 	while (s < SECTORS_PER_CHUNK)
 	{
 		if (!(slot.dirtyMask & (1 << s))) { ++s; continue; }
+
+		if (deadline && (s32)(read32(ARM_SYSTIMER_CLO) - deadline) >= 0)
+			return 0;
 
 		u32 run = 1;
 		while (s + run < SECTORS_PER_CHUNK && (slot.dirtyMask & (1 << (s + run))))
@@ -554,7 +563,7 @@ int ScsiImage::FlushAllDirty(u32 deadline)
 
 		if (cacheSlots[i].valid && cacheSlots[i].dirtyMask && cacheSlots[i].image == imageId)
 		{
-			if (FlushChunk(cacheSlots[i]) != 0)
+			if (FlushChunk(cacheSlots[i], deadline) != 0)
 				++failed;
 		}
 	}
