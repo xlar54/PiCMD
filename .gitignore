@@ -10,6 +10,10 @@
 # Build output
 target/
 
+# Host test binary
+tests/run_tests
+tests/run_tests.exe
+
 # ...but the Raspberry Pi firmware kept for building SD cards is not a build
 # artifact, despite matching the patterns above.
 !firmware/**/*.elf
