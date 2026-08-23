@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  # The host tests. These are the ones that can actually fail on logic rather
+  # than on whether something compiles, so they run first and with the
+  # sanitizers on - Linux has libasan, unlike MinGW.
+  tests:
+    name: Host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run
+        run: make -C tests SANITIZE=1
+
+  # Both targets, because they have broken independently before: the Pi Zero
+  # build has its own conditional code and is not exercised by day to day work
+  # on a Pi 3.
+  firmware:
+    name: Build RASPPI=${{ matrix.rasppi }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rasppi: [0, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the ARM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi \
+                                  libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib
+      - name: Build
+        run: make RASPPI=${{ matrix.rasppi }}
+      - name: Check a kernel came out
+        run: test -s target/kernel.img
