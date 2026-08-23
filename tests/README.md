@@ -66,6 +66,12 @@ FAIL  a short write is a failure, and the data survives it
 That `got 171` is the original fill byte still sitting on the card: the tail of
 the sector never landed. Restore with `git checkout -- src/emulation/scsi.cpp`.
 
+Do this for a case you have just written, before trusting it. The eviction test
+here passed its first review while asserting nothing at all — it recovered the
+card, flushed, and never looked at whether the data had survived, so clearing a
+failed victim's dirty mask left all 135 checks green. A case that cannot fail is
+worse than no case, because it reads as coverage.
+
 ## Worth knowing
 
 These tests replace the hardware layer, so they **cannot** catch a bug in it.

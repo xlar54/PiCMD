@@ -236,9 +236,19 @@ static void EvictionDoesNotDiscardUnwritableData()
 
 	std::vector<u8> buf = Pattern(0x77);
 
+	// Every sector whose write was ACKNOWLEDGED. That is the promise being
+	// tested: the drive told the computer these landed, so they must end up on
+	// the card - whatever happens to the cache in between. Writes that
+	// honestly reported failure carry no such promise and are not collected.
+	std::vector<u32> acknowledged;
+
 	// Fill the cache with dirty chunks.
 	for (u32 c = 0; c < 16; ++c)
-		CHECK_EQ(img.WriteSector(c * PER_CHUNK, &buf[0]), 0);
+	{
+		u32 lba = c * PER_CHUNK;
+		CHECK_EQ(img.WriteSector(lba, &buf[0]), 0);
+		acknowledged.push_back(lba);
+	}
 
 	// Now break the card and keep writing, forcing evictions that cannot
 	// succeed. Some of these will fail, which is correct - what must not
@@ -247,14 +257,29 @@ static void EvictionDoesNotDiscardUnwritableData()
 	int reported = 0;
 	for (u32 c = 16; c < 64; ++c)
 	{
-		if (img.WriteSector(c * PER_CHUNK, &buf[0]) != 0)
+		u32 lba = c * PER_CHUNK;
+		if (img.WriteSector(lba, &buf[0]) != 0)
 			++reported;
+		else
+			acknowledged.push_back(lba);
 	}
 	CHECK_MSG(reported > 0, "writes against a dead card all claimed to succeed");
 
 	// Recover the card. Everything still held dirty must now land.
 	FakeFs::FailWritesAfter(-1);
 	ScsiImage::FlushAll();
+
+	// The assertion that gives this test its teeth. Without it the case passes
+	// even when a failed eviction clears the victim's dirty bits and drops the
+	// data - which is exactly the bug it is named after.
+	u32 lost = 0;
+	for (size_t i = 0; i < acknowledged.size(); ++i)
+	{
+		if (OnCard(acknowledged[i]) != 0x77 || OnCard(acknowledged[i], SECTOR - 1) != 0x77)
+			++lost;
+	}
+	CHECK_EQ(lost, 0);
+	CHECK_MSG(acknowledged.size() >= 16, "no writes were acknowledged, so nothing was proved");
 
 	img.Detach();
 }
