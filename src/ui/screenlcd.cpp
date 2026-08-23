@@ -21,7 +21,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include "debug.h"
-#include "ssd_logo.h"
+// ssd_logo.h is not included here on purpose. It defines the logo arrays
+// rather than declaring them, and const at namespace scope has internal
+// linkage - so including it gave this translation unit its own private copy
+// of every logo (3KB now that there are three) that nothing in here uses.
 
 extern unsigned char* CBMFont;
 

@@ -288,6 +288,12 @@ void InitialiseLCD()
 		if ((height == 64) && (strcasecmp(options.GetLcdLogoName(), "cmd") == 0))
 		{
 			screenLCD->PlotRawImage(logo_ssd_cmd, 0, 0, width, height);
+			// Version over the splash, as the 1541ii logo does. This is now
+			// the default logo, so without it nobody sees the version at boot
+			// unless they go looking - and "which build is on this card" is
+			// the first question every bug report needs answered.
+			snprintf(tempBuffer, tempBufferSize, "Pi-CMD V%d.%02d", versionMajor, versionMinor);
+			screenLCD->PrintText(false, 16, 0, tempBuffer, 0xffffffff);
 			logo_done = true;
 		}
 		else if ( (height == 64) && (strcasecmp(options.GetLcdLogoName(), "1541ii") == 0) )
