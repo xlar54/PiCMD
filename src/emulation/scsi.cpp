@@ -453,12 +453,6 @@ int ScsiImage::WriteSector(u32 lba, const u8* buffer)
 	if (!attached || readOnly)
 		return -1;
 
-	// A deferred flush failed since the last command. The host was told that
-	// write succeeded and cannot be told otherwise now, so report the error
-	// here instead - once - and let HDOS surface it. The data itself is still
-	// dirty in the cache and will be retried.
-	if (TakeWriteError())
-		return -1;
 
 	if (lba >= sizeInSectors)
 		return -1;
@@ -708,7 +702,8 @@ s32 scsi_image_write(scsi_context_t* context)
 
 /* default format handler */
 /* We don't actually format the disk, we just zero out the first sector */
-static void scsi_format_sector0(scsi_context_t* context)
+/* Returns 0 on success, non-zero if the write did not happen. */
+static s32 scsi_format_sector0(scsi_context_t* context)
 {
 	s32 i;
 
@@ -719,7 +714,10 @@ static void scsi_format_sector0(scsi_context_t* context)
 		context->data_buf[i] = 0;
 	}
 
-	scsi_image_write(context);
+	// The result matters: on read-only media or a failing card this write does
+	// not happen, and reporting FORMAT UNIT as successful when the disk is
+	// untouched is worse than reporting the failure.
+	return scsi_image_write(context);
 }
 
 u8 scsi_get_bus(scsi_context_t* context)
@@ -887,12 +885,26 @@ void scsi_process_ack(scsi_context_t* context)
 					context->command == SCSI_COMMAND_WRITE_10 ||
 					context->command == SCSI_COMMAND_WRITE_VERIFY)
 				{
-					if (scsi_image_write(context))
+					// A deferred flush failed since the last host command. The
+					// computer was told that earlier write succeeded and cannot
+					// be told otherwise now, so report it against this one and
+					// let HDOS surface it. The data is still dirty in the cache
+					// and will be retried.
+					//
+					// This is checked here rather than inside WriteSector so
+					// that the drive's own internal writes - the base LBA scan,
+					// the format handler - cannot consume the latched error
+					// before the host ever sees it.
+					ScsiImage* img = scsi_imagecheck(context) ? 0 :
+						context->file[(context->target << 3) | context->lun];
+
+					if (scsi_image_write(context) || (img && img->TakeWriteError()))
 					{
 						// Say why, so REQUEST SENSE returns something
 						// meaningful instead of whatever was left over from
 						// the last command.
 						context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+						context->asc = SCSI_SASC_WRITEFAULT;
 						context->status = SCSI_STATUS_CHECKCONDITION;
 						context->state = SCSI_STATE_STATUS;
 						break;
@@ -937,9 +949,21 @@ void scsi_process_ack(scsi_context_t* context)
 					}
 					else
 					{
-						context->status = SCSI_STATUS_GOOD;
+						// Run the handler first and report what it did. This used to set
+						// GOOD before calling it and ignore the result, so a format that
+						// never touched the disk - read only media, a failing card -
+						// still looked like a success.
 						context->state = SCSI_STATE_STATUS;
-						context->user_format(context);
+						if (context->user_format(context))
+						{
+							context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+							context->asc = SCSI_SASC_WRITEFAULT;
+							context->status = SCSI_STATUS_CHECKCONDITION;
+						}
+						else
+						{
+							context->status = SCSI_STATUS_GOOD;
+						}
 					}
 				}
 				else if (context->command == SCSI_COMMAND_REASSIGN_BLOCKS)
@@ -1055,7 +1079,21 @@ void scsi_process_ack(scsi_context_t* context)
 					context->data_buf[2] = context->sensekey;
 					context->data_buf[12] = context->asc;
 					context->status = SCSI_STATUS_GOOD;
-					context->state = SCSI_STATE_STATUS;
+
+					// Hand the sense data back, rather than going straight to
+					// STATUS with GOOD and never sending it. Building the
+					// eighteen bytes and then dropping them meant the host
+					// could tell that a command had failed but never why -
+					// every CHECK CONDITION in this file was effectively
+					// reasonless.
+					context->state = SCSI_STATE_DATAIN;
+					context->seq = 0;
+
+					// Sense is consumed by reading it. Leaving it latched
+					// makes the next REQUEST SENSE describe an error that has
+					// already been reported and dealt with.
+					context->sensekey = SCSI_SENSEKEY_NOSENSE;
+					context->asc = 0;
 					break;
 				case SCSI_COMMAND_REASSIGN_BLOCKS:
 					context->state = SCSI_STATE_DATAOUT;
@@ -1109,6 +1147,8 @@ void scsi_process_ack(scsi_context_t* context)
 					}
 					else
 					{
+						context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+						context->asc = SCSI_SASC_UNRECOVEREDREADERROR;
 						context->status = SCSI_STATUS_CHECKCONDITION;
 						context->state = SCSI_STATE_STATUS;
 					}
@@ -1161,6 +1201,11 @@ void scsi_process_ack(scsi_context_t* context)
 					}
 					else
 					{
+						// No image attached at that target/LUN, which is a
+						// different thing from a media error and worth saying
+						// so - HDOS can tell "no disk" from "bad disk".
+						context->sensekey = SCSI_SENSEKEY_NOTREADY;
+						context->asc = SCSI_SASC_MEDIUMNOTPRESENT;
 						context->status = SCSI_STATUS_CHECKCONDITION;
 						context->state = SCSI_STATE_STATUS;
 					}
@@ -1291,9 +1336,17 @@ void scsi_process_ack(scsi_context_t* context)
 					}
 					else if ((context->cmd_buf[1] & 0x17) == 0x00)
 					{
-						context->status = SCSI_STATUS_GOOD;
 						context->state = SCSI_STATE_STATUS;
-						context->user_format(context);
+						if (context->user_format(context))
+						{
+							context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+							context->asc = SCSI_SASC_WRITEFAULT;
+							context->status = SCSI_STATUS_CHECKCONDITION;
+						}
+						else
+						{
+							context->status = SCSI_STATUS_GOOD;
+						}
 					}
 					else
 					{
@@ -1355,6 +1408,11 @@ void scsi_process_ack(scsi_context_t* context)
 					/* read it, report error if a problem */
 					if (scsi_image_read(context))
 					{
+						// As on the write path: set the sense as well as the
+						// status, or REQUEST SENSE describes whatever the last
+						// command left behind.
+						context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+						context->asc = SCSI_SASC_UNRECOVEREDREADERROR;
 						context->status = SCSI_STATUS_CHECKCONDITION;
 						context->state = SCSI_STATE_STATUS;
 						break;

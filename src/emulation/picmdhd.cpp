@@ -157,15 +157,16 @@ void cmdhd_scsiwrite(scsi_context_t* scsi)
 }
 
 // We don't actually format the disk, we just remove the 16 byte CMD signature
-void cmdhd_scsiformat(scsi_context_t* scsi)
+s32 cmdhd_scsiformat(scsi_context_t* scsi)
 {
 	PiCMDHD* hd = (PiCMDHD*)(scsi->p);
 	int i;
+	s32 result = 0;
 
 	// leave if we are not the first disk
 	if (scsi->target != 0 || scsi->lun != 0)
 	{
-		return;
+		return 0;
 	}
 
 	// figure out where to start looking
@@ -205,14 +206,17 @@ void cmdhd_scsiformat(scsi_context_t* scsi)
 			{
 				scsi->data_buf[0x1f0 + i] = 0;
 			}
-			// write it back
-			scsi_image_write(scsi);
+			// write it back. If that fails the signature is still there and
+			// the disk is not formatted, so say so rather than reporting a
+			// successful FORMAT UNIT over an untouched disk.
+			result = scsi_image_write(scsi);
 			break;
 		}
 		// otherwise, keep looking
 		scsi->address += 128;
 	}
 	hd->scanTotal = 0;
+	return result;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

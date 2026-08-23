@@ -161,7 +161,7 @@ public:
 private:
 	friend void cmdhd_scsiread(scsi_context_t* scsi);
 	friend void cmdhd_scsiwrite(scsi_context_t* scsi);
-	friend void cmdhd_scsiformat(scsi_context_t* scsi);
+	friend s32 cmdhd_scsiformat(scsi_context_t* scsi);
 
 	void FindBaseLBA();
 	void UpdateButtonInputs();
