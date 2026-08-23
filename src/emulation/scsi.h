@@ -78,11 +78,22 @@ public:
 	// losing acknowledged writes there is worse than a pause.
 	static int FlushAll();
 
+	// As FlushAll, but stops after roughly maxChunks chunks (0 = no limit).
+	// Reset uses this: that path is reached from the IEC RESET line with the
+	// host already running, so an unbounded flush would take the drive off the
+	// bus for as long as the card needs - minutes, with a large dirty cache.
+	static int FlushSome(u32 maxChunks);
+
+	// About a quarter second of card time at the worst measured rate.
+	static const u32 RESET_FLUSH_CHUNKS = 8;
+
 	// Flush dirty chunks and FatFS metadata. Does nothing unless forced -
 	// going to the card at an arbitrary moment is what broke the bus. Detach
 	// and reset force it; everything else waits for an idle window.
-	// Returns 0 on success.
-	int Sync(bool force = false);
+	// Returns 0 if everything went out, 1 if the chunk budget stopped it part
+	// way (more still dirty), negative on a write failure. sharedFlushed lets
+	// several images draw on one budget; pass 0 for a private one.
+	int Sync(bool force = false, u32 maxChunks = 0, u32* sharedFlushed = 0);
 
 	// Writes are acknowledged to the host as soon as they reach the cache, so
 	// by the time a flush fails the computer has long since been told the
@@ -132,7 +143,12 @@ private:
 	// Both return 0 on success. A chunk that fails keeps its dirty bits so the
 	// next flush tries again rather than dropping the data on the floor.
 	int FlushChunk(CacheSlot& slot);
-	int FlushAllDirty();
+	int FlushAllDirty(u32 maxChunks = 0, u32* flushed = 0);
+
+	// Write a slot back so it can be reused. False means the data could not be
+	// written and the slot must be left where it is - the cache is the only
+	// copy, so evicting it anyway is data loss.
+	static bool EvictSlot(CacheSlot* victim);
 	static void NoteStall(u32 startMicros);
 
 	// A chunk being evicted can belong to a different disk, so we need to get

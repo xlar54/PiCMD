@@ -436,16 +436,23 @@ void PiCMDHD::Reset()
 	int units;
 	int i;
 
-	// Get acknowledged writes onto the card before the drive restarts.
+	// Write back a bounded amount before the drive restarts.
 	//
-	// Writes are taken into the cache and acknowledged immediately - going to
-	// the card mid-command freezes the emulated CPU for as long as the card
-	// takes, which the bus will not tolerate. The flush therefore waits for an
-	// idle window. Reset is the one other safe moment: nothing is mid-transfer
-	// and a pause here costs nothing, whereas resetting or powering off with
-	// dirty chunks still in RAM loses writes the computer was told had landed.
-	// That is what turns "copy the files, reset, boot" into a corrupt volume.
-	ScsiImage::FlushAll();
+	// Reset is a good moment to get dirty chunks onto the card - the machine
+	// is usually about to be powered off or reconfigured, and the cache is the
+	// only copy of anything acknowledged but not yet written. It is not a free
+	// moment though: this path is reached from the IEC RESET line as well as
+	// from the front panel button, and WaitUntilReset() returns as soon as the
+	// host releases RESET. The computer is therefore already running and about
+	// to poll a drive that cannot answer ATN while it is talking to the card.
+	//
+	// A full flush is unbounded - 32MB of cache is 8192 chunks, and at the 35ms
+	// per access measured on this hardware that is minutes. So take a slice and
+	// leave the rest to the idle path, which runs when the bus is genuinely
+	// quiet. RESET_FLUSH_CHUNKS is about a quarter second of card time at the
+	// worst measured rate, which the host will not notice on top of its own
+	// reset.
+	ScsiImage::FlushSome(ScsiImage::RESET_FLUSH_CHUNKS);
 
 	via9.Reset();
 	via10.Reset();
