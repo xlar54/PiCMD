@@ -239,7 +239,9 @@ void Screen::WriteChar(bool petscii, u32 x, u32 y, unsigned char c, RGBA colour)
 		}
 		for (u32 py = 0; py < fontHeight; ++py)
 		{
-			if (y + py > height)
+			// >= , not >. Valid rows are 0..height-1, so y + py == height is
+			// already one scanline past the end of the framebuffer.
+			if (y + py >= height)
 				return;
 
 			unsigned char b = fontBitMap[c * fontHeight + py];

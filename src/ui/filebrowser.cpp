@@ -703,7 +703,18 @@ void FileBrowser::RefreshFolderEntries()
 							for (unsigned index = 0; index < folder.entries.size(); ++index)
 							{
 								FileBrowser::BrowsableList::Entry* entryAtIndex = &folder.entries[index];
-								if (strncasecmp(entry.filIcon.fname, entryAtIndex->filImage.fname, length) == 0)
+
+								// Match the whole stem, not just its first
+								// characters. A prefix compare gave hd.png to
+								// hd-backup.dhd as readily as to hd.dhd, and
+								// which one ended up with it depended on the
+								// order the directory happened to enumerate in.
+								const char* imageExt = strrchr(entryAtIndex->filImage.fname, '.');
+								int imageStem = imageExt ? (int)(imageExt - entryAtIndex->filImage.fname)
+									: (int)strlen(entryAtIndex->filImage.fname);
+
+								if (imageStem == length &&
+									strncasecmp(entry.filIcon.fname, entryAtIndex->filImage.fname, length) == 0)
 									entryAtIndex->filIcon = entry.filIcon;
 							}
 						}
