@@ -269,22 +269,25 @@ configuration block the override behaves normally.
 
 ### The front panel lamps on an LCD
 
-If you have an I2C display configured (`LCDName`), the drive's six indicator
-lamps are shown on it while emulating:
+If you have an I2C display configured (`LCDName`), the drive's indicator lamps
+are shown on it while emulating, with a POWER tile added:
 
 ```
 POWER   ACTIVE
 ERROR   WR PROT
-DRIVE 8 DRIVE 9
+D8  D9  GEOS
 <track / temperature>
 ```
+
+The bottom row uses short tags whatever the panel size - three names will not
+fit across sixteen characters as full words.
 
 These OLED panels are **monochrome**, so a lit lamp cannot be a different
 colour - it is drawn as an **inverse video block** (a solid bar with the name
 knocked out of it), which is easy to read at a glance. Unlit lamps are plain
 text.
 
-POWER is lit whenever the drive is running. The other five come straight from
+POWER is lit whenever the drive is running. The other six come straight from
 the U20 latch, so they behave exactly as the real panel does - including the
 SWAP lamps lighting when the drive has swapped to device 8 or 9, WR PROT
 following the write protect state, and the lamps being used as a binary digit
