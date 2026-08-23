@@ -965,7 +965,7 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 			else if (++quietLoops >= 500000)		// this loop runs at 1MHz
 			{
 				quietLoops = 0;
-				ScsiImage::FlushIdle();
+				ScsiImage::FlushAll();		// idle window - safe to touch the card
 			}
 		}
 

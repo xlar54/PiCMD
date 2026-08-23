@@ -130,23 +130,40 @@ void ScsiImage::Detach()
 	}
 }
 
-void ScsiImage::Sync(bool force)
+int ScsiImage::Sync(bool force)
 {
 	if (!attached || !needSync)
-		return;
+		return 0;
 
 	// Only ever flush on demand. This used to run on a timer from the SCSI
 	// state machine returning to BUSFREE - which is between commands, exactly
 	// when the computer is about to poll for status. A single SD access has
 	// been measured at 35ms on this hardware, far longer than the bus will
 	// wait, so the drive vanished mid-transfer. Flushing now happens only when
-	// the bus has gone quiet (FlushIdle) or on detach.
+	// the bus has gone quiet (FlushAll from the idle check), on reset, or on
+	// detach.
 	if (!force)
-		return;
+		return 0;
 
-	FlushAllDirty();
-	f_sync(&file);
+	int failed = FlushAllDirty();
+
+	// f_sync pushes FatFS's own metadata (the directory entry and FAT chain).
+	// Losing that loses the file, not just the sectors, so it counts too.
+	if (f_sync(&file) != FR_OK)
+		++failed;
+
+	if (failed)
+	{
+		// Leave needSync set: the dirty chunks are still dirty and the next
+		// flush must try them again.
+		writeErrorPending = true;
+		++writeErrors;
+		DEBUG_LOG("SCSI: %d chunk(s) failed to write on '%s' - data kept for retry\r\n", failed, name);
+		return -1;
+	}
+
 	needSync = false;
+	return 0;
 }
 
 ScsiImage::CacheSlot* ScsiImage::FindSlot(u32 chunkIndex, bool allocate)
@@ -193,19 +210,23 @@ ScsiImage* ScsiImage::attachedImages[64] = { 0 };
 u32 ScsiImage::numAttachedImages = 0;
 u32 ScsiImage::worstStallMicros = 0;
 u32 ScsiImage::accessCounter = 0;
+u32 ScsiImage::writeErrors = 0;
 
-void ScsiImage::FlushIdle()
+int ScsiImage::FlushAll()
 {
+	int failed = 0;
+
 	for (u32 i = 0; i < numAttachedImages; ++i)
 	{
 		ScsiImage* img = attachedImages[i];
 		if (img && img->attached && img->needSync)
 		{
-			img->FlushAllDirty();
-			f_sync(&img->file);
-			img->needSync = false;
+			if (img->Sync(true) != 0)
+				++failed;
 		}
 	}
+
+	return failed;
 }
 
 ScsiImage* ScsiImage::ImageById(u8 id)
@@ -350,6 +371,13 @@ int ScsiImage::WriteSector(u32 lba, const u8* buffer)
 	if (!attached || readOnly)
 		return -1;
 
+	// A deferred flush failed since the last command. The host was told that
+	// write succeeded and cannot be told otherwise now, so report the error
+	// here instead - once - and let HDOS surface it. The data itself is still
+	// dirty in the cache and will be retried.
+	if (TakeWriteError())
+		return -1;
+
 	if (lba >= sizeInSectors)
 		return -1;
 
@@ -408,23 +436,38 @@ int ScsiImage::FlushChunk(CacheSlot& slot)
 		u64 offset = ((u64)slot.chunkIndex << CACHE_CHUNK_SHIFT) + (u64)s * SECTOR_SIZE;
 		if (f_lseek(&file, offset) != FR_OK)
 			return -1;
-		if (f_write(&file, slot.data + s * SECTOR_SIZE, run * SECTOR_SIZE, &written) != FR_OK)
+		// A short write counts as a failure. FatFS reports one on a full card
+		// without setting an error, and taking it for success is how a full
+		// card used to turn into silent corruption: the run below would clear
+		// the dirty bits and the only copy of the data went away.
+		if (f_write(&file, slot.data + s * SECTOR_SIZE, run * SECTOR_SIZE, &written) != FR_OK ||
+			written != run * SECTOR_SIZE)
 			return -1;
 		NoteStall(t0);
+
+		// Clear only what actually reached the card, so a failure part way
+		// through a chunk leaves the rest dirty for the next attempt.
+		slot.dirtyMask &= (u8)~(((1 << run) - 1) << s);
 		s += run;
 	}
 
-	slot.dirtyMask = 0;
 	return 0;
 }
 
-void ScsiImage::FlushAllDirty()
+int ScsiImage::FlushAllDirty()
 {
+	int failed = 0;
+
 	for (u32 i = 0; i < numCacheSlots; ++i)
 	{
 		if (cacheSlots[i].valid && cacheSlots[i].dirtyMask && cacheSlots[i].image == imageId)
-			FlushChunk(cacheSlots[i]);
+		{
+			if (FlushChunk(cacheSlots[i]) != 0)
+				++failed;
+		}
 	}
+
+	return failed;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -734,6 +777,10 @@ void scsi_process_ack(scsi_context_t* context)
 				{
 					if (scsi_image_write(context))
 					{
+						// Say why, so REQUEST SENSE returns something
+						// meaningful instead of whatever was left over from
+						// the last command.
+						context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
 						context->status = SCSI_STATUS_CHECKCONDITION;
 						context->state = SCSI_STATE_STATUS;
 						break;

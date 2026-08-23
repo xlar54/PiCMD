@@ -436,6 +436,17 @@ void PiCMDHD::Reset()
 	int units;
 	int i;
 
+	// Get acknowledged writes onto the card before the drive restarts.
+	//
+	// Writes are taken into the cache and acknowledged immediately - going to
+	// the card mid-command freezes the emulated CPU for as long as the card
+	// takes, which the bus will not tolerate. The flush therefore waits for an
+	// idle window. Reset is the one other safe moment: nothing is mid-transfer
+	// and a pause here costs nothing, whereas resetting or powering off with
+	// dirty chunks still in RAM loses writes the computer was told had landed.
+	// That is what turns "copy the files, reset, boot" into a corrupt volume.
+	ScsiImage::FlushAll();
+
 	via9.Reset();
 	via10.Reset();
 
