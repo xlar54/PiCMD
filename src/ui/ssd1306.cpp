@@ -43,8 +43,10 @@ SSD1306::SSD1306(int BSCMaster, u8 address, unsigned width, unsigned height, int
 
 	if (!frame || !oldFrame)
 	{
-		// Nothing can be drawn without these, and every refresh dereferences
-		// them. Better to end up with no display than a wild write.
+		// Every drawing and refresh path dereferences these, so there is
+		// nothing safe to do with this object. Mark it unusable and leave the
+		// hardware alone; ScreenLCD::Open checks IsValid and throws it away
+		// rather than driving a panel through null pointers.
 		free(frame);
 		free(oldFrame);
 		frame = 0;
@@ -64,6 +66,12 @@ SSD1306::SSD1306(int BSCMaster, u8 address, unsigned width, unsigned height, int
 
 	RPI_I2CInit(BSCMaster, 1);
 	InitHardware();
+}
+
+SSD1306::~SSD1306()
+{
+	free(frame);
+	free(oldFrame);
 }
 
 void SSD1306::InitHardware()

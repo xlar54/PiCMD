@@ -33,7 +33,9 @@ public:
 	{
 	}
 
-	void Open(u32 width, u32 height, u32 colourDepth, int BSCMaster, int LCDAddress, int LCDFlip, LCD_MODEL LCDType, bool luseCBMFont);
+	// Returns false if the panel could not be brought up; the object must
+	// not be used in that case.
+	bool Open(u32 width, u32 height, u32 colourDepth, int BSCMaster, int LCDAddress, int LCDFlip, LCD_MODEL LCDType, bool luseCBMFont);
 
 	void DrawRectangle(u32 x1, u32 y1, u32 x2, u32 y2, RGBA colour);
 	void Clear(RGBA colour);

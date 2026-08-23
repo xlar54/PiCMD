@@ -269,7 +269,16 @@ void InitialiseLCD()
 		if (i2cLcdModel == LCD_1306_128x32)
 			height = 32;
 		screenLCD = new ScreenLCD();
-		screenLCD->Open(width, height, 1, i2cBusMaster, i2cLcdAddress, i2cLcdFlip, i2cLcdModel, i2cLcdUseCBMChar);
+		if (!screenLCD->Open(width, height, 1, i2cBusMaster, i2cLcdAddress, i2cLcdFlip, i2cLcdModel, i2cLcdUseCBMChar))
+		{
+			// No panel. Everything downstream tests screenLCD for null and
+			// carries on without one, so this costs the display and nothing
+			// else - which beats dying on the first PrintText.
+			DEBUG_LOG("LCD: could not open display, continuing without it\r\n");
+			delete screenLCD;
+			screenLCD = 0;
+			return;
+		}
 		screenLCD->SetContrast(i2cLcdOnContrast);
 		screenLCD->ClearInit(0); // sh1106 needs this
 

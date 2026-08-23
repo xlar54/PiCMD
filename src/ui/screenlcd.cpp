@@ -25,7 +25,7 @@
 
 extern unsigned char* CBMFont;
 
-void ScreenLCD::Open(u32 widthDesired, u32 heightDesired, u32 colourDepth, int BSCMaster, int LCDAddress, int LCDFlip, LCD_MODEL LCDType, bool luseCBMFont)
+bool ScreenLCD::Open(u32 widthDesired, u32 heightDesired, u32 colourDepth, int BSCMaster, int LCDAddress, int LCDFlip, LCD_MODEL LCDType, bool luseCBMFont)
 {
 	bpp = 1;
 
@@ -43,11 +43,25 @@ void ScreenLCD::Open(u32 widthDesired, u32 heightDesired, u32 colourDepth, int B
 	useCBMFont = luseCBMFont;
  
 	ssd1306 = new SSD1306(BSCMaster, LCDAddress, width, height, LCDFlip, LCDType);
+
+	// If the frame buffers could not be allocated there is nothing to draw
+	// into, and everything below here - starting with ClearScreen - would
+	// walk a null pointer. Fail instead, and let the caller carry on with no
+	// LCD rather than take the machine down over a display.
+	if (!ssd1306->IsValid())
+	{
+		delete ssd1306;
+		ssd1306 = 0;
+		opened = false;
+		return false;
+	}
+
 	ssd1306->ClearScreen();
 	ssd1306->RefreshScreen();
 	ssd1306->DisplayOn();
 
 	opened = true;
+	return true;
 }
 
 void ScreenLCD::DrawRectangle(u32 x1, u32 y1, u32 x2, u32 y2, RGBA colour)

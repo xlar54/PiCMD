@@ -76,6 +76,12 @@ public:
 	// 128x32 0x3C
 	// 128x64 0x3D or 0x3C (if SA0 is grounded)
 	SSD1306(int BSCMaster = 1, u8 address = 0x3C, unsigned width = 128, unsigned height = 64, int flip = 0, LCD_MODEL type=LCD_UNKNOWN);
+	~SSD1306();
+
+	// False if the frame buffers could not be allocated. Every drawing and
+	// refresh method dereferences them, so an invalid object must be thrown
+	// away rather than used - see ScreenLCD::Open.
+	bool IsValid() const { return frame != 0 && oldFrame != 0; }
 
 	void PlotCharacter(bool useCBMFont, bool petscii, int x, int y, char ascii, bool inverse);
 	void PlotText(bool useCBMFont, bool petscii, int x, int y, char* str, bool inverse);
