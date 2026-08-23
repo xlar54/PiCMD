@@ -608,6 +608,24 @@ static u32 scsi_getmaxsize(scsi_context_t* context)
 	return 0;
 }
 
+// A background flush failed since the last command was processed. The host was
+// told that write succeeded and cannot be told otherwise, so it gets reported
+// against whatever comes next.
+//
+// Against ANY next command, not just another write: a host that has finished
+// writing may well only ever read again, or just poll TEST UNIT READY, and the
+// failure would then never surface at all.
+static s32 scsi_imagecheck(scsi_context_t* context);
+
+static bool scsi_take_deferred_write_error(scsi_context_t* context)
+{
+	if (scsi_imagecheck(context))
+		return false;
+
+	ScsiImage* image = context->file[(context->target << 3) | context->lun];
+	return image && image->TakeWriteError();
+}
+
 static s32 scsi_imagecheck(scsi_context_t* context)
 {
 	if (context->target >= MAXIDS || context->lun >= MAXLUNS)
@@ -1046,16 +1064,28 @@ void scsi_process_ack(scsi_context_t* context)
 				case SCSI_COMMAND_TEST_UNIT_READY:
 					context->lun = (context->cmd_buf[1] >> 5) & 7;
 					context->link = context->cmd_buf[5] & 1;
+					context->state = SCSI_STATE_STATUS;
 					if (scsi_imagecheck(context))
 					{
-						context->sensekey = SCSI_SENSEKEY_ILLEGALREQUEST;
+						// Nothing attached is NOT READY / medium not present,
+						// not ILLEGAL REQUEST - and it used to set no ASC at
+						// all, so the sense described the previous command.
+						context->sensekey = SCSI_SENSEKEY_NOTREADY;
+						context->asc = SCSI_SASC_MEDIUMNOTPRESENT;
 						context->status = SCSI_STATUS_CHECKCONDITION;
-						context->state = SCSI_STATE_STATUS;
+					}
+					else if (scsi_take_deferred_write_error(context))
+					{
+						// This is the command a host polls with, so it is the
+						// one most likely to be the first thing issued after
+						// the writing has finished.
+						context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+						context->asc = SCSI_SASC_WRITEFAULT;
+						context->status = SCSI_STATUS_CHECKCONDITION;
 					}
 					else
 					{
 						context->status = SCSI_STATUS_GOOD;
-						context->state = SCSI_STATE_STATUS;
 					}
 					break;
 				case SCSI_COMMAND_REQUEST_SENSE:
@@ -1077,6 +1107,11 @@ void scsi_process_ack(scsi_context_t* context)
 					context->data_buf[0] = 0x80 | 0x70;
 					context->data_buf[1] = 0x00;
 					context->data_buf[2] = context->sensekey;
+					// Additional sense length: the count of bytes after byte 7.
+					// Eighteen byte fixed format sense means 10. It was left at
+					// zero, which tells a compliant initiator that byte 12 -
+					// the ASC it is being handed - is not there.
+					context->data_buf[7] = 10;
 					context->data_buf[12] = context->asc;
 					context->status = SCSI_STATUS_GOOD;
 
@@ -1132,10 +1167,31 @@ void scsi_process_ack(scsi_context_t* context)
 						}
 					}
 					context->data_max = 512;
+
+					// "Is there a disk" before "is that block on the disk".
+					// The other way round, an absent image has a maximum size
+					// of zero, so every LBA failed as out of range and the
+					// medium-not-present case was unreachable.
+					if (scsi_imagecheck(context))
+					{
+						context->sensekey = SCSI_SENSEKEY_NOTREADY;
+						context->asc = SCSI_SASC_MEDIUMNOTPRESENT;
+						context->status = SCSI_STATUS_CHECKCONDITION;
+						context->state = SCSI_STATE_STATUS;
+						break;
+					}
 					if (context->address >= scsi_getmaxsize(context))
 					{
 						context->sensekey = SCSI_SENSEKEY_ILLEGALREQUEST;
 						context->asc = SCSI_SASC_LOGICALBLOCKADDRESSOUTOFRANGE;
+						context->status = SCSI_STATUS_CHECKCONDITION;
+						context->state = SCSI_STATE_STATUS;
+						break;
+					}
+					if (scsi_take_deferred_write_error(context))
+					{
+						context->sensekey = SCSI_SENSEKEY_MEDIUMERROR;
+						context->asc = SCSI_SASC_WRITEFAULT;
 						context->status = SCSI_STATUS_CHECKCONDITION;
 						context->state = SCSI_STATE_STATUS;
 						break;
@@ -1186,6 +1242,18 @@ void scsi_process_ack(scsi_context_t* context)
 						}
 					}
 					context->data_max = 512;
+
+					// Same ordering point as the read path: without this, an absent image
+					// has a maximum size of zero so every LBA fails as out of range and
+					// the medium-not-present case below is unreachable.
+					if (scsi_imagecheck(context))
+					{
+						context->sensekey = SCSI_SENSEKEY_NOTREADY;
+						context->asc = SCSI_SASC_MEDIUMNOTPRESENT;
+						context->status = SCSI_STATUS_CHECKCONDITION;
+						context->state = SCSI_STATE_STATUS;
+						break;
+					}
 					if (context->address >= scsi_getmaxsize(context))
 					{
 						context->sensekey = SCSI_SENSEKEY_ILLEGALREQUEST;

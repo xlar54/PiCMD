@@ -161,7 +161,14 @@ s32 cmdhd_scsiformat(scsi_context_t* scsi)
 {
 	PiCMDHD* hd = (PiCMDHD*)(scsi->p);
 	int i;
-	s32 result = 0;
+
+	// Nothing has been done yet, so the default is failure. Only zeroing the
+	// signature counts as having formatted the disk - an empty image, a read
+	// that failed part way through the scan, or a scan that ran to the end
+	// without finding a signature all leave the disk exactly as it was, and
+	// reporting GOOD for those is how FORMAT UNIT came to succeed over disks
+	// it had never touched.
+	s32 result = -1;
 
 	// leave if we are not the first disk
 	if (scsi->target != 0 || scsi->lun != 0)
