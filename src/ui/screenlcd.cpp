@@ -44,13 +44,18 @@ bool ScreenLCD::Open(u32 widthDesired, u32 heightDesired, u32 colourDepth, int B
  
 	ssd1306 = new SSD1306(BSCMaster, LCDAddress, width, height, LCDFlip, LCDType);
 
-	// If the frame buffers could not be allocated there is nothing to draw
-	// into, and everything below here - starting with ClearScreen - would
-	// walk a null pointer. Fail instead, and let the caller carry on with no
-	// LCD rather than take the machine down over a display.
-	if (!ssd1306->IsValid())
+	// operator new here is noexcept and hands back malloc's result, so it
+	// returns null rather than throwing - checking it is not paranoia, it is
+	// the only thing that catches this.
+	//
+	// If the object exists but its frame buffers could not be allocated there
+	// is nothing to draw into either, and everything below - starting with
+	// ClearScreen - would walk a null pointer. Fail on both, and let the
+	// caller carry on with no LCD rather than take the machine down over a
+	// display.
+	if (!ssd1306 || !ssd1306->IsValid())
 	{
-		delete ssd1306;
+		delete ssd1306;			// deleting null is fine, and frees the buffers otherwise
 		ssd1306 = 0;
 		opened = false;
 		return false;

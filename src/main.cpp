@@ -269,7 +269,9 @@ void InitialiseLCD()
 		if (i2cLcdModel == LCD_1306_128x32)
 			height = 32;
 		screenLCD = new ScreenLCD();
-		if (!screenLCD->Open(width, height, 1, i2cBusMaster, i2cLcdAddress, i2cLcdFlip, i2cLcdModel, i2cLcdUseCBMChar))
+		// new is noexcept in this build and returns malloc's result, so it can
+		// hand back null instead of throwing.
+		if (!screenLCD || !screenLCD->Open(width, height, 1, i2cBusMaster, i2cLcdAddress, i2cLcdFlip, i2cLcdModel, i2cLcdUseCBMChar))
 		{
 			// No panel. Everything downstream tests screenLCD for null and
 			// carries on without one, so this costs the display and nothing
