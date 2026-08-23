@@ -777,7 +777,14 @@ public:
 	// disables it (the drive then simply never drives ATN).
 	static inline void SetAtnOutGPIO(u32 gpio)
 	{
-		atnOutGPIO = gpio;
+		// Range check it here, once, rather than trusting options.txt.
+		// RefreshAtnOut turns this straight into a register address -
+		// ARM_GPIO_GPFSEL0 + (gpio / 10) * 4 - so a typo like 240 in the
+		// config file walks out of the GPIO bank entirely and starts
+		// read-modify-writing whatever peripheral registers happen to follow.
+		// The BCM283x has GPIO 0-53; anything else disables the function,
+		// which is what 0 already means.
+		atnOutGPIO = (gpio <= 53) ? gpio : 0;
 	}
 
 	// CA1 input ATN
