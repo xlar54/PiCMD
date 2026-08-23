@@ -65,10 +65,11 @@ u32 IEC_Bus::myOutsGPFSEL1 = 0;
 u32 IEC_Bus::myOutsGPFSEL0 = 0;
 bool IEC_Bus::InputButton[5] = { 0 };
 bool IEC_Bus::InputButtonPrev[5] = { 0 };
-u32 IEC_Bus::validInputCount[5] = { 0 };
+bool IEC_Bus::buttonPressed[5] = { 0 };
 u32 IEC_Bus::inputRepeatThreshold[5];
 u32 IEC_Bus::inputRepeat[5] = { 0 };
 u32 IEC_Bus::inputRepeatPrev[5] = { 0 };
+u32 IEC_Bus::pressStartTime[5] = { 0 };
 
 
 u32 IEC_Bus::emulationModeCheckButtonIndex = 0;
@@ -77,9 +78,14 @@ unsigned IEC_Bus::gplev0;
 
 void IEC_Bus::ReadGPIOUserInput()
 {
+	// One timer read for all the buttons - see UpdateButton's comment. This is
+	// on the ~1MHz emulation path, where an uncached peripheral read per button
+	// would be five times the cost for no benefit.
+	u32 nowUs = read32(ARM_SYSTIMER_CLO);
+
 	for (int index = 0; index < buttonCount; ++index)
 	{
-		UpdateButton(index, gplev0);
+		UpdateButton(index, gplev0, nowUs);
 	}
 }
 
