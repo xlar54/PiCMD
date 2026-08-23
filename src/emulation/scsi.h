@@ -78,22 +78,29 @@ public:
 	// losing acknowledged writes there is worse than a pause.
 	static int FlushAll();
 
-	// As FlushAll, but stops after roughly maxChunks chunks (0 = no limit).
+	// As FlushAll, but gives up after maxMicros of real time (0 = no limit).
 	// Reset uses this: that path is reached from the IEC RESET line with the
 	// host already running, so an unbounded flush would take the drive off the
 	// bus for as long as the card needs - minutes, with a large dirty cache.
-	static int FlushSome(u32 maxChunks);
+	//
+	// The budget is time rather than chunks because a chunk is up to four
+	// separate writes when its dirty sectors are not contiguous, so a chunk
+	// count bounds the work only to within a factor of four.
+	static int FlushSome(u32 maxMicros);
 
-	// About a quarter second of card time at the worst measured rate.
-	static const u32 RESET_FLUSH_CHUNKS = 8;
+	// Quarter of a second: unnoticeable on top of the host's own reset, and
+	// enough for several chunks even at the worst measured card latency.
+	static const u32 RESET_FLUSH_MICROS = 250000;
 
 	// Flush dirty chunks and FatFS metadata. Does nothing unless forced -
 	// going to the card at an arbitrary moment is what broke the bus. Detach
 	// and reset force it; everything else waits for an idle window.
-	// Returns 0 if everything went out, 1 if the chunk budget stopped it part
-	// way (more still dirty), negative on a write failure. sharedFlushed lets
-	// several images draw on one budget; pass 0 for a private one.
-	int Sync(bool force = false, u32 maxChunks = 0, u32* sharedFlushed = 0);
+	//
+	// deadline is an absolute ARM_SYSTIMER_CLO value, 0 for no limit; one
+	// deadline shared by several images bounds the whole flush rather than
+	// each image separately. Returns 0 if everything went out, 1 if dirty
+	// chunks remain, negative on a write failure.
+	int Sync(bool force = false, u32 deadline = 0);
 
 	// Writes are acknowledged to the host as soon as they reach the cache, so
 	// by the time a flush fails the computer has long since been told the
@@ -127,7 +134,7 @@ private:
 	{
 		u8* data;
 		u32 chunkIndex;
-		u8 image;		// which image (index into a small registry)
+		u32 image;		// which image owns this chunk; see nextImageId
 		u8 valid;		// slot is allocated to this chunk
 		// Per sector, because a write must never have to read first. Reading
 		// the chunk in just to modify one sector of it meant an SD access on
@@ -143,7 +150,12 @@ private:
 	// Both return 0 on success. A chunk that fails keeps its dirty bits so the
 	// next flush tries again rather than dropping the data on the floor.
 	int FlushChunk(CacheSlot& slot);
-	int FlushAllDirty(u32 maxChunks = 0, u32* flushed = 0);
+	int FlushAllDirty(u32 deadline = 0);
+
+	// Whether this image still has chunks waiting to be written. Read only -
+	// callers use it to decide whether a flush finished, so it must not be
+	// tempted into writing anything itself.
+	bool HasDirtyChunks() const;
 
 	// Write a slot back so it can be reused. False means the data could not be
 	// written and the slot must be left where it is - the cache is the only
@@ -155,14 +167,14 @@ private:
 	// back from the id stored in the slot to the image that owns the file.
 	static ScsiImage* attachedImages[64];
 	static u32 numAttachedImages;
-	static ScsiImage* ImageById(u8 id);
+	static ScsiImage* ImageById(u32 id);
 
 	static u8* cachePool;
 	static CacheSlot* cacheSlots;
 	static u32 numCacheSlots;
-	static u8 nextImageId;
+	static u32 nextImageId;
 
-	u8 imageId;
+	u32 imageId;
 
 	int FillChunk(u32 chunkIndex, CacheSlot& slot);
 	CacheSlot* FindSlot(u32 chunkIndex, bool allocate);

@@ -449,10 +449,9 @@ void PiCMDHD::Reset()
 	// A full flush is unbounded - 32MB of cache is 8192 chunks, and at the 35ms
 	// per access measured on this hardware that is minutes. So take a slice and
 	// leave the rest to the idle path, which runs when the bus is genuinely
-	// quiet. RESET_FLUSH_CHUNKS is about a quarter second of card time at the
-	// worst measured rate, which the host will not notice on top of its own
-	// reset.
-	ScsiImage::FlushSome(ScsiImage::RESET_FLUSH_CHUNKS);
+	// quiet. The slice is a quarter second of real time, which the host will
+	// not notice on top of its own reset.
+	ScsiImage::FlushSome(ScsiImage::RESET_FLUSH_MICROS);
 
 	via9.Reset();
 	via10.Reset();
