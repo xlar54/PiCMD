@@ -479,6 +479,128 @@ public:
 	// Out going
 	static void PortB_OnPortOut(void* pUserData, unsigned char status);
 
+	// Push only DATA and CLOCK to the physical pins right now, skipping SRQ,
+	// LED, sound and ATN-out. This is called both from the once-per-loop
+	// RefreshOutsCMDHD() below and - event-driven - from PortB_OnPortOut(),
+	// so a CPU write to U10 ORB/DDRB reaches the wire inside the same
+	// emulated cycle instead of waiting up to ~1us for the next periodic
+	// refresh. That ~1us of slack was enough to occasionally misalign
+	// GEOS's 2-bit-per-sample turbo protocol, whose symbol gaps run only
+	// ~8-11us - so a whole microsecond of latency is a large fraction of one
+	// symbol, and the receiver can sample the wrong half of a bit pair.
+	static inline void RefreshIECOutsNow(void)
+	{
+		if (!splitIECLines)
+		{
+			unsigned outputs = 0;
+
+			if (AtnaDataSetToOut || DataSetToOut) outputs |= (FS_OUTPUT << ((PIGPIO_DATA - 10) * 3));
+			if (ClockSetToOut) outputs |= (FS_OUTPUT << ((PIGPIO_CLOCK - 10) * 3));
+
+			unsigned nValue = (myOutsGPFSEL1 & PI_OUTPUT_MASK_GPFSEL1) | outputs;
+			write32(ARM_GPIO_GPFSEL1, nValue);
+
+			// A single GPFSEL1 write changes both lines at once, so the
+			// ordering problem handled below cannot arise here. ATN out still
+			// has to be refreshed though - it lives in a different GPFSEL
+			// register and is driven the same way on split and non split
+			// wiring alike.
+			RefreshAtnOut();
+			return;
+		}
+
+		// Kept in bus terms - asserted means "pulling the line low" - for as
+		// long as possible. Which physical level that is depends on the
+		// buffer: with an inverting one (7406, invertIECOutputs = 1) asserting
+		// drives the pin high; with a non inverting one (7407) it drives it
+		// low. Deciding the write order below in bus terms rather than pin
+		// terms is what keeps this correct for both.
+		unsigned assertBits = 0;
+		unsigned releaseBits = 0;
+
+		if (AtnaDataSetToOut || DataSetToOut) assertBits |= 1 << PIGPIO_OUT_DATA;
+		else releaseBits |= 1 << PIGPIO_OUT_DATA;
+
+		if (ClockSetToOut) assertBits |= 1 << PIGPIO_OUT_CLOCK;
+		else releaseBits |= 1 << PIGPIO_OUT_CLOCK;
+
+		// GPSET0/GPCLR0 are two separate register writes, not one atomic
+		// change. If this call moves one line from released to asserted and
+		// the other from asserted to released at the same time, writing them
+		// in the "wrong" order leaves a few-cycle window where the old level
+		// of one line is combined with the new level of the other - exactly
+		// the kind of transient a 2-bit-per-sample GEOS turbo read can latch
+		// as a corrupted nibble. Release before assert only in that case; keep
+		// the original assert-then-release order otherwise.
+		bool newlyAsserted = (assertBits & ~oldAssertBits) != 0;
+		bool newlyReleased = (releaseBits & ~oldReleaseBits) != 0;
+
+		u32 assertReg = invertIECOutputs ? ARM_GPIO_GPSET0 : ARM_GPIO_GPCLR0;
+		u32 releaseReg = invertIECOutputs ? ARM_GPIO_GPCLR0 : ARM_GPIO_GPSET0;
+
+		if (newlyAsserted && newlyReleased)
+		{
+			write32(releaseReg, releaseBits);
+			write32(assertReg, assertBits);
+		}
+		else
+		{
+			write32(assertReg, assertBits);
+			write32(releaseReg, releaseBits);
+		}
+
+		oldAssertBits = assertBits;
+		oldReleaseBits = releaseBits;
+	}
+
+	// Sample only DATA and CLOCK from the physical pins right now, skipping
+	// ATN, SRQ, reset and buttons. This is called - event-driven - right
+	// before the CPU's read of U10 ORB is resolved (see PiCMDHD::Read), in
+	// addition to the once-per-loop ReadEmulationModeCMDHD() below, so a
+	// transition that happened on the wire during the current emulated cycle
+	// is visible to that same read instead of only showing up on the next
+	// periodic sample. ATN is deliberately left alone here: its CA1
+	// edge/ATNA-gate handling must stay on the periodic path only, or it can
+	// double-fire - a full periodic-style refresh on every half-cycle was
+	// tried first and broke BASIC LOAD for exactly that reason.
+	//
+	// The cost is that a single LDA ORB can now mix ages: pb0/pb2 come from
+	// this sample while pb7 (ATN in) still holds whatever the last periodic
+	// read saw, up to ~1us earlier. Real hardware takes all three off one pin
+	// snapshot. Testing across GEOS 2.0, GDOS64 and WHEELS has not shown this
+	// biting, but it is the first thing to suspect if an ATN handshake ever
+	// desyncs here.
+	static inline void SampleIECInsNow(void)
+	{
+		if (!port)
+			return;
+
+		unsigned lev = read32(ARM_GPIO_GPLEV0);
+
+		if (AtnaDataSetToOut || DataSetToOut)
+		{
+			PI_Data = true;
+			port->SetInput(VIAPORTPINS_DATAIN, true);	// simulate the read in software
+		}
+		else
+		{
+			bool DATAIn = (lev & PIGPIO_MASK_IN_DATA) == (invertIECInputs ? PIGPIO_MASK_IN_DATA : 0);
+			PI_Data = DATAIn;
+			port->SetInput(VIAPORTPINS_DATAIN, DATAIn);
+		}
+
+		if (ClockSetToOut)
+		{
+			PI_Clock = true;
+			port->SetInput(VIAPORTPINS_CLOCKIN, true);	// simulate the read in software
+		}
+		else
+		{
+			bool CLOCKIn = (lev & PIGPIO_MASK_IN_CLOCK) == (invertIECInputs ? PIGPIO_MASK_IN_CLOCK : 0);
+			PI_Clock = CLOCKIn;
+			port->SetInput(VIAPORTPINS_CLOCKIN, CLOCKIn);
+		}
+	}
 
 	// Refresh all outputs including SRQ (fast serial).
 	static inline void RefreshOutsCMDHD(void)
@@ -487,27 +609,10 @@ public:
 		unsigned clear = 0;
 		unsigned tmp;
 
-		if (!splitIECLines)
+		RefreshIECOutsNow();	// DATA/CLOCK, event-driven ordering-safe path
+
+		if (splitIECLines)
 		{
-			unsigned outputs = 0;
-
-			if (AtnaDataSetToOut || DataSetToOut) outputs |= (FS_OUTPUT << ((PIGPIO_DATA - 10) * 3));
-			if (ClockSetToOut) outputs |= (FS_OUTPUT << ((PIGPIO_CLOCK - 10) * 3));
-			//if (SRQSetToOut) outputs |= (FS_OUTPUT << ((PIGPIO_SRQ - 10) * 3));			// For Option A hardware we should not support pulling more than 2 lines low at any one time!
-
-			unsigned nValue = (myOutsGPFSEL1 & PI_OUTPUT_MASK_GPFSEL1) | outputs;
-			write32(ARM_GPIO_GPFSEL1, nValue);
-
-			RefreshAtnOut();
-		}
-		else
-		{
-			if (AtnaDataSetToOut || DataSetToOut) set |= 1 << PIGPIO_OUT_DATA;
-			else clear |= 1 << PIGPIO_OUT_DATA;
-
-			if (ClockSetToOut) set |= 1 << PIGPIO_OUT_CLOCK;
-			else clear |= 1 << PIGPIO_OUT_CLOCK;
-
 			if (SRQSetToOut) set |= 1 << PIGPIO_OUT_SRQ;	// fast clock is pulled high but we have an inverter in our hardware so to compensate we invert in software now
 			else clear |= 1 << PIGPIO_OUT_SRQ;
 
@@ -676,8 +781,11 @@ public:
 	static bool OutputSound;
 
 private:
-	static u32 oldClears;
-	static u32 oldSets;
+	// Previous DATA/CLOCK state in bus terms (asserted = pulling low), not raw
+	// pin levels - see RefreshIECOutsNow(). Only ever covers PIGPIO_OUT_DATA
+	// and PIGPIO_OUT_CLOCK; nothing else writes them.
+	static u32 oldReleaseBits;
+	static u32 oldAssertBits;
 
 	static bool splitIECLines;
 	static bool invertIECInputs;
