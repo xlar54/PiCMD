@@ -186,11 +186,16 @@ Options::Options(void)
 	, CMDHDButtonWP(3)
 	, CMDHDButtonReset(4)
 	, CMDHDButtonExit(5)
+	, UTCOffsetMinutes(0)
+	, wifiSdioTest(0)
+	, wifiEnabled(0)
 {
 	autoMountImageName[0] = 0;
 	strcpy(ROMFontName, "chargen");
 	strcpy(LcdLogoName, "cmd");
 	ROMNameCMDHD[0] = 0;
+	NTPServer[0] = 0;
+	wifiSSID[0] = wifiPassword[0] = wifiCountry[0] = 0;
 	// GetLCDName is called whether or not options.txt sets LCDName, and it was
 	// left uninitialised - so with no LCDName line it returned a pointer into
 	// 256 bytes of stack leftovers with no terminator guaranteed.
@@ -290,6 +295,19 @@ void Options::Process(char* buffer)
 		{
 			CopyOption(ROMNameCMDHD, sizeof(ROMNameCMDHD), pValue);
 		}
+		else if (strcasecmp(pOption, "NTPServer") == 0)
+		{
+			CopyOption(NTPServer, sizeof(NTPServer), pValue);
+		}
+		else if (strcasecmp(pOption, "UTCOffsetMinutes") == 0)
+		{
+			UTCOffsetMinutes = (int)strtol(pValue, NULL, 0);
+		}
+		ELSE_CHECK_DECIMAL_OPTION(wifiSdioTest)
+		ELSE_CHECK_DECIMAL_OPTION(wifiEnabled)
+		else if (strcasecmp(pOption, "WiFiSSID") == 0) CopyOption(wifiSSID, sizeof(wifiSSID), pValue);
+		else if (strcasecmp(pOption, "WiFiPassword") == 0) CopyOption(wifiPassword, sizeof(wifiPassword), pValue);
+		else if (strcasecmp(pOption, "WiFiCountry") == 0) CopyOption(wifiCountry, sizeof(wifiCountry), pValue);
 		ELSE_CHECK_DECIMAL_OPTION(CMDHDDeviceID)
 		ELSE_CHECK_DECIMAL_OPTION(CMDHDCacheMB)
 		ELSE_CHECK_DECIMAL_OPTION(CMDHDAtnOutGPIO)

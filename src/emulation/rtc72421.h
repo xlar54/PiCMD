@@ -43,6 +43,11 @@ public:
 
 	void Reset();
 
+	// Set the calendar directly (e.g. from an NTP fetch) rather than through
+	// the register nibble-write protocol. year2digit is 0-99 (2000-2099),
+	// month/day are 1 based, weekday is 0-6, hours is always 24h form.
+	void SetDateTime(u8 year2digit, u8 month, u8 day, u8 weekday, u8 hours, u8 minutes, u8 seconds);
+
 	u8 Read(u8 address);
 	void Write(u8 address, u8 data);
 

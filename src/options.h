@@ -59,6 +59,18 @@ public:
 	inline unsigned int GetCMDHDLcdLamps() const { return CMDHDLcdLamps; }
 	inline unsigned int GetSupportUARTInput() const { return supportUARTInput; }
 
+	// Wired NTP time sync (feature/wifi-time-set, phase 1). Empty NTPServer
+	// means the feature is off, same convention as AutoMountImage.
+	inline const char* GetNTPServer() const { return NTPServer; }
+	inline int GetUTCOffsetMinutes() const { return UTCOffsetMinutes; }
+	// Raw BCM43430 SDIO identification test. Kept separate from the eventual
+	// WiFi/NTP feature so board routing can be diagnosed safely first.
+	inline unsigned int GetWiFiSdioTest() const { return wifiSdioTest; }
+	inline unsigned int GetWiFiEnabled() const { return wifiEnabled; }
+	inline const char* GetWiFiSSID() const { return wifiSSID; }
+	inline const char* GetWiFiPassword() const { return wifiPassword; }
+	inline const char* GetWiFiCountry() const { return wifiCountry; }
+
 	inline unsigned int GraphIEC() const { return graphIEC; }
 	inline unsigned int QuickBoot() const { return quickBoot; }
 	inline unsigned int ShowOptions() const { return showOptions; }
@@ -190,6 +202,12 @@ private:
 	char autoMountImageName[256];
 	char ROMFontName[256];
 	char ROMNameCMDHD[256];
+
+	char NTPServer[64];
+	int UTCOffsetMinutes;
+	unsigned int wifiSdioTest;
+	unsigned int wifiEnabled;
+	char wifiSSID[64], wifiPassword[64], wifiCountry[4];
 
 
 };

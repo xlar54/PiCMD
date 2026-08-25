@@ -148,6 +148,28 @@ GraphIEC = 1
 //ShowOptions = 1
 
 // ---------------------------------------------------------------------------
+// Network time (NTP)
+// ---------------------------------------------------------------------------
+
+// IPv4 address of the NTP server. Empty disables time sync.
+// No DNS lookup is available.
+//NTPServer = 162.159.200.1
+
+// Minutes added to UTC, e.g. 60 for UTC+1.
+//UTCOffsetMinutes = 0
+
+// WiFi time sync for Raspberry Pi 3. Requires the three matching files in
+// /wlan-firmware/: brcmfmac43430-sdio.bin, .txt and .clm_blob.
+// WiFiCountry must be your actual two-letter uppercase country code.
+//wifiSdioTest = 0
+// Detailed WiFi diagnostic. Keep disabled for normal boot.
+//WiFiEnabled = 0
+//WiFiSSID = YourNetwork
+//WiFiPassword = YourWpa2Password
+//WiFiCountry = CZ
+// WiFiEnabled = 1 fetches NTPServer through WiFi at boot.
+
+// ---------------------------------------------------------------------------
 // Browser and misc
 // ---------------------------------------------------------------------------
 
