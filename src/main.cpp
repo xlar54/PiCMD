@@ -40,6 +40,13 @@ extern "C"
 #include "diskio.h"
 #include "emmc.h"
 #include "picmdhd.h"
+#include "ntpclient.h"
+#include "wifi_sdio.h"
+#include "brcm_chip.h"
+#include "sdpcm.h"
+#include "bcdc.h"
+#include "wpa2.h"
+#include "wifi_data_link.h"
 #include "scsi.h"
 #include "screen.h"
 #include "filebrowser.h"
@@ -84,6 +91,43 @@ unsigned char* CBMFont = 0;
 u8 LcdLogoFile[LCD_LOGO_MAX_SIZE];
 
 u8 s_u8Memory[0xc000];
+
+// Kept static: the firmware must be read while the SD route is active, then
+// remains valid while the shared EMMC controller is routed to WLAN.
+static u8 s_wifiFirmware[512 * 1024];
+static u8 s_wifiNvram[8192];
+static u8 s_wifiClm[16 * 1024];
+
+static u32 PackWifiNvram(u8* data, u32 length, u32 capacity)
+{
+	u32 out = 0, start = 0;
+	for (u32 i = 0; i <= length; ++i) if (i == length || data[i] == '\n' || data[i] == '\r')
+	{
+		u32 first=start, last=i; while(first<last && (data[first]==' '||data[first]=='\t'))++first; while(last>first && (data[last-1]==' '||data[last-1]=='\t'))--last;
+		if(first<last && data[first]!='#') { if(out + last-first + 6 > capacity) return 0; memmove(data+out,data+first,last-first); out+=last-first; data[out++]=0; }
+		start=i+1;
+	}
+	if(out + 6 > capacity) return 0; data[out++]=0; while(out&3)data[out++]=0;
+	u32 words=out/4, token=(words&0xFFFF)|((~words&0xFFFF)<<16); data[out++]=(u8)token;data[out++]=(u8)(token>>8);data[out++]=(u8)(token>>16);data[out++]=(u8)(token>>24); return out;
+}
+
+static bool LoadWifiFile(const char* name, u8* destination, u32 capacity, u32& length)
+{
+	FILINFO info;
+	FIL file;
+	UINT read = 0;
+	length = 0;
+	if (f_stat(name, &info) != FR_OK || (u32)info.fsize == 0 || (u32)info.fsize > capacity)
+		return false;
+	if (f_open(&file, name, FA_READ) != FR_OK)
+		return false;
+	FRESULT result = f_read(&file, destination, (u32)info.fsize, &read);
+	f_close(&file);
+	if (result != FR_OK || read != (UINT)info.fsize)
+		return false;
+	length = (u32)info.fsize;
+	return true;
+}
 
 int numberOfUSBMassStorageDevices = 0;
 PiCMDHD piCMDHD;
@@ -1854,7 +1898,117 @@ extern "C"
 #endif
 		ChangeToImageFolder();
 
+#if not defined(EXPERIMENTALZERO)
+		bool wifiNtpAttempted = false;
+		bool wifiNtpOk = false;
+		// The Pi 3's WLAN and SD card share the EMMC controller. This boot-time
+		// operation always restores the SD route and EMMC driver before IEC
+		// emulation begins. wifiSdioTest keeps the detailed bring-up diagnostic;
+		// WiFiEnabled is the normal one-shot time-sync feature.
+		if (options.GetWiFiSdioTest() || (options.GetWiFiEnabled() && options.GetNTPServer()[0]))
+		{
+			u32 wifiFirmwareSize = 0, wifiNvramSize = 0, wifiClmSize = 0;
+			bool filesOk = LoadWifiFile("SD:/wlan-firmware/brcmfmac43430-sdio.bin", s_wifiFirmware, sizeof(s_wifiFirmware), wifiFirmwareSize)
+				&& LoadWifiFile("SD:/wlan-firmware/brcmfmac43430-sdio.txt", s_wifiNvram, sizeof(s_wifiNvram), wifiNvramSize);
+			bool clmOk = LoadWifiFile("SD:/wlan-firmware/brcmfmac43430-sdio.clm_blob", s_wifiClm, sizeof(s_wifiClm), wifiClmSize);
+			if (!filesOk)
+			{
+				snprintf(tempBuffer, tempBufferSize, "WiFi firmware files missing/invalid");
+				screen.PrintText(false, 0, y_pos += 16, tempBuffer, COLOUR_RED, COLOUR_BLACK);
+			}
+			else
+			{
+				snprintf(tempBuffer, tempBufferSize, "WiFi FW %uK, NVRAM %u bytes", wifiFirmwareSize / 1024, wifiNvramSize);
+				screen.PrintText(false, 0, y_pos += 16, tempBuffer, COLOUR_WHITE, COLOUR_BLACK);
+			}
+			snprintf(tempBuffer, tempBufferSize, "Testing BCM43430 SDIO...");
+			screen.PrintText(false, 0, y_pos += 16, tempBuffer, COLOUR_WHITE, COLOUR_BLACK);
+			bool wifiSdioOk = WifiSdio_SwitchToWlan();
+			BrcmChipInfo chip;
+			BrcmAlpDebug alp = {};
+			bool chipOk = wifiSdioOk && BrcmChip_Identify(chip) && BrcmChip_RequestAlp(alp, 1000000) && BrcmChip_SetPassive(chip);
+			bool uploadOk = false;
+			bool nvramOk = false;
+			bool firmwareStarted = false;
+			bool bcdcOk = false;
+			bool regulatoryOk = false;
+			bool associationAttempted = false;
+			Wpa2Result associationResult = WPA2_INCONCLUSIVE;
+			Wpa2Debug associationDebug = {};
+			if (chipOk && filesOk)
+			{
+				u32 uploadSize = (wifiFirmwareSize + 3) & ~3u;
+				for (u32 i = wifiFirmwareSize; i < uploadSize; ++i)
+					s_wifiFirmware[i] = 0;
+				uploadOk = BrcmChip_BackplaneWriteBlock(chip.ramBase, s_wifiFirmware, uploadSize);
+				u32 nvramSize = PackWifiNvram(s_wifiNvram, wifiNvramSize, sizeof(s_wifiNvram));
+				if (uploadOk && nvramSize <= chip.ramSize)
+					nvramOk = BrcmChip_BackplaneWriteBlock(chip.ramBase + chip.ramSize - nvramSize, s_wifiNvram, nvramSize);
+				if (nvramOk)
+					firmwareStarted = BrcmChip_StartFirmware(chip, s_wifiFirmware);
+				if (firmwareStarted)
+				{
+					char version[128];
+					// A matching SET reply proves that control frames work in both
+					// directions, not merely that the firmware can answer "ver".
+					// Keep MPC disabled during the opt-in diagnostic so the radio is
+					// not put to sleep between the next association-stage requests.
+					bcdcOk = Sdpcm_WaitReady(chip, 3000000) && Bcdc_GetVersion(version, sizeof(version)) && Bcdc_SetInt("mpc", 0);
+					regulatoryOk = bcdcOk && clmOk && Bcdc_UploadClm(s_wifiClm, wifiClmSize) && Bcdc_SetCountry(options.GetWiFiCountry()) && Bcdc_EnableAssociationEvents();
+					if (regulatoryOk && options.GetWiFiSSID()[0] && options.GetWiFiPassword()[0])
+					{
+						associationAttempted = true;
+						associationResult = Wpa2_Associate(options.GetWiFiSSID(), options.GetWiFiPassword(), 15000000, associationDebug);
+						if (associationResult == WPA2_ASSOCIATED && options.GetNTPServer()[0])
+						{
+							wifiNtpAttempted = true;
+							u8 wifiMac[6];
+							if (WifiDataLink_GetMac(wifiMac))
+								wifiNtpOk = NtpClient_FetchAndSetTimeOverFrames(piCMDHD, WifiDataLink_GetFrameIO(), wifiMac, options.GetNTPServer(), options.GetUTCOffsetMinutes(), 15000);
+						}
+					}
+					if (bcdcOk) snprintf(tempBuffer, tempBufferSize, "WiFi FW: %.96s", version);
+				}
+			}
+			const char* wifiSdioError = wifiSdioOk ? BrcmChip_LastError() : WifiSdio_LastError();
+			WifiSdio_SwitchBackToSd();
+			m_EMMC.Initialize();
+			disk_setEMM(&m_EMMC);
+			if (wifiNtpAttempted && wifiNtpOk)
+				snprintf(tempBuffer, tempBufferSize, "WiFi NTP time set OK");
+			else if (wifiNtpAttempted)
+				snprintf(tempBuffer, tempBufferSize, "WiFi NTP fetch failed");
+			else if (associationAttempted && associationResult == WPA2_ASSOCIATED)
+				snprintf(tempBuffer, tempBufferSize, "WiFi WPA2 associated (%u events)", associationDebug.eventCount);
+			else if (associationAttempted)
+				snprintf(tempBuffer, tempBufferSize, "WiFi WPA2 failed: %s", associationDebug.failure);
+			else if (regulatoryOk)
+				snprintf(tempBuffer, tempBufferSize, "WiFi BCDC/CLM/country/events ready");
+			else if (bcdcOk)
+				snprintf(tempBuffer, tempBufferSize, "WiFi regulatory setup failed: %s", clmOk ? Bcdc_LastError() : "CLM blob missing");
+			else if (firmwareStarted)
+				snprintf(tempBuffer, tempBufferSize, "WiFi SDPCM/BCDC failed: %s", Bcdc_LastError());
+			else if (nvramOk)
+				snprintf(tempBuffer, tempBufferSize, "WiFi firmware start failed: %s", BrcmChip_LastError());
+			else if (uploadOk)
+				snprintf(tempBuffer, tempBufferSize, "WiFi NVRAM upload failed: %s", BrcmChip_LastError());
+			else if (chipOk)
+				snprintf(tempBuffer, tempBufferSize, "WiFi firmware upload failed: %s", BrcmChip_LastError());
+			else
+				snprintf(tempBuffer, tempBufferSize, "WiFi SDIO failed: %s", wifiSdioError);
+			screen.PrintText(false, 0, y_pos += 16, tempBuffer, wifiSdioOk ? COLOUR_WHITE : COLOUR_RED, COLOUR_BLACK);
+		}
+		if (options.GetNTPServer()[0] != 0 && !wifiNtpAttempted)
+		{
+			snprintf(tempBuffer, tempBufferSize, "Fetching time via NTP (%s)...", options.GetNTPServer());
+			screen.PrintText(false, 0, y_pos += 16, tempBuffer, COLOUR_WHITE, COLOUR_BLACK);
 
+			bool ntpOk = NtpClient_FetchAndSetTime(piCMDHD, options.GetNTPServer(), options.GetUTCOffsetMinutes(), 5000);
+
+			snprintf(tempBuffer, tempBufferSize, ntpOk ? "NTP time set OK" : "NTP time fetch failed - using default clock");
+			screen.PrintText(false, 0, y_pos += 16, tempBuffer, ntpOk ? COLOUR_WHITE : COLOUR_RED, COLOUR_BLACK);
+		}
+#endif
 
 		IEC_Bus::Initialise();
 		if (screenLCD)

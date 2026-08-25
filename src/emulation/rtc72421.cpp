@@ -65,6 +65,20 @@ void RTC72421::Reset()
 	microsAccumulated = 0;
 }
 
+void RTC72421::SetDateTime(u8 year2digit, u8 month, u8 day, u8 weekday, u8 hours, u8 minutes, u8 seconds)
+{
+	this->seconds = seconds > 59 ? 59 : seconds;
+	this->minutes = minutes > 59 ? 59 : minutes;
+	this->hours = hours > 23 ? 23 : hours;
+	this->day = day < 1 ? 1 : day;
+	this->month = (month < 1) ? 1 : ((month > 12) ? 12 : month);
+	this->year = year2digit % 100;
+	this->weekday = weekday > 6 ? 6 : weekday;
+	stop = false;
+	lastMicros = read32(ARM_SYSTIMER_CLO);
+	microsAccumulated = 0;
+}
+
 void RTC72421::IncrementSecond()
 {
 	if (++seconds < 60) return;
