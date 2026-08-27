@@ -68,6 +68,14 @@ private:
 	}												\
 	else addressModeCycleFn = &M65C02::InstructionFetch;
 
+
+static inline u32 PiCMDArmCycles(void)
+{
+	u32 v;
+	asm volatile ("mrc p15,0,%0,c9,c13,0" : "=r" (v));
+	return v;
+}
+
 class M65C02
 {
 private:

@@ -27,8 +27,22 @@ m6522::m6522()
 	Reset();
 }
 
+u32 m6522::srBytesIn = 0;
+u32 m6522::srEdgesWhileFull = 0;
+u32 m6522::srShortReads = 0;
+u32 m6522::srModeMask = 0;
+u32 m6522::srShiftsIn = 0;
+u32 m6522::srShiftsOut = 0;
+
 void m6522::Reset()
 {
+#if PICMD_SPLIT_CPUVIAS
+	idleSkips = 0; busyRuns = 0;
+	// Reset is what puts the VIA back to idle, so the sticky bits start clean
+	// with it - otherwise a session would inherit the previous mount's answer.
+	diagStartedT1 = 0; diagStartedT2 = 0; diagWroteACR = 0;
+	diagAcrLast = 0; diagIerLast = 0;
+#endif
 	functionControlRegister = 0;
 	auxiliaryControlRegister = 0;
 
@@ -65,7 +79,6 @@ void m6522::Reset()
 	t2LowTimedOut = false;
 	t2CountingPB6Mode = false;
 	t2CountingPB6ModeOld = false;
-	pb6Old = 0;
 	t2TimedOut = false;
 	t2OneShotTriggeredIRQ = false;
 
@@ -84,6 +97,9 @@ void m6522::Reset()
 	cb1OutputShiftClockPositiveEdge = false;
 	cb2Shift = 1;				// fast serial data line idles released
 	OutputIRQ();
+#if PICMD_VIA_IDLE_SKIP
+	UpdateIdleCache();
+#endif
 }
 
 void m6522::InputCA1(bool value)
@@ -141,6 +157,47 @@ void m6522::Execute()
 	if (ca2 && pulseCA2) ca2 = false;
 	if (cb2 && pulseCB2) cb2 = false;
 
+	// An idle VIA still costs about 76 ARM cycles per call, and there are four
+	// calls per emulated microsecond in a loop that has little to spare. On
+	// this machine U9 is idle for whole sessions - measured, not assumed:
+	// PICMD-LST33.LOG reports "idle at eject: U9 acr 00 t1 0 t2 0" while U10
+	// reports "acr 4c t1 1 t2 1", so the detector fires and the zero is real.
+	// Neither the CMD HD boot ROM nor the HDOS kernel writes U9's T1CH, T2CH
+	// or ACR at all.
+	//
+	// The predicate is ONE cached boolean on purpose. The first version tested
+	// nine pieces of state here and cost about 44 cycles - paid on all four
+	// calls while the saving is only collected on the two idle ones - so it
+	// came out 25 cycles per microsecond WORSE than no early-out at all
+	// (PICMD-LST31 against LST29). Every term now lives in idleCache, which is
+	// recomputed in Write() and Reset(), the only two places that can turn any
+	// of them on: while the cache is true nothing reachable sets t1Ticking,
+	// t2CountingDown, t1TimedOut, t2TimedOut, t1Reload or the pending shift
+	// clock edge, because every one of their setters is inside the code this
+	// skips. That is what makes caching safe rather than merely cheap.
+	//
+	// The two pulse tests above stay outside: they are what the function did
+	// first anyway, they are cheap, and keeping them out of the predicate is
+	// most of why it is now a single load.
+#if PICMD_VIA_IDLE_SKIP
+	if (idleCache)
+	{
+		// Faithful to the two assignments at the end of the function. cb1Old
+		// especially: dropping it would leave a stale level for the shift
+		// register's edge detector if ACR were written later.
+		cb1Old = cb1;
+		t2CountingPB6ModeOld = t2CountingPB6Mode;
+#if PICMD_SPLIT_CPUVIAS
+		idleSkips++;
+#endif
+		return;
+	}
+#endif
+#if PICMD_SPLIT_CPUVIAS
+	busyRuns++;
+#endif
+
+
 	// The t1 counter decrements on each succeeding phi2 from N to 0 and then one half phi2 cycle later IRQ goes active.
 	// (where N is the combined count value of T1CL and T1CH)
 	if (t1TimedOut)
@@ -192,8 +249,12 @@ void m6522::Execute()
 	}
 	t1Reload = false;
 
-	// Timer 2 can also be used to count negative pulses on the	PB6 line.
-	unsigned char pb6 = portB.GetInput() & ~portB.GetDirection() & 0x40;
+	// Timer 2's PB6 pulse counting mode is not emulated, and never was. What
+	// stood here read PB6 on every call to feed a negative edge test below
+	// that compared a value masked with 0x40 against 1 - so the test could
+	// never fire, for any guest, and the read was pure cost. Removing it is an
+	// exact equivalence. Making the mode actually work is a behaviour change
+	// and belongs in its own commit, with something that uses it to test.
 	unsigned char shiftMode = (auxiliaryControlRegister & ACR_SHIFTREG_CTRL) >> 2;
 
 	// The data is shifted into the shift register during the phi2 clock cycle following the positive going edge of the CB1 clock pulse.
@@ -252,11 +313,9 @@ void m6522::Execute()
 			// Bit 5 of the ACR determines whether the counter is decremented by the 6502 system clock or input pulses arriving on PB6.
 			if (t2CountingPB6Mode && t2CountingPB6ModeOld)
 			{
-				if (pb6 == 0 && pb6Old == 1)	// Was it the negative edge?
-				{
-					t2c.value--;
-					t2TimedOut = t2c.value == 0;
-				}
+				// The negative edge test that was here could not fire; see the
+				// note where pb6 was read. Counting stops in this mode, which
+				// is what the unreachable test amounted to anyway.
 			}
 			else
 			{
@@ -299,8 +358,16 @@ void m6522::Execute()
 			}
 		}
 	}
-	pb6Old = pb6;
 	t2CountingPB6ModeOld = t2CountingPB6Mode;
+
+#if PICMD_SPLIT_CPUVIAS
+	// Diagnostic only: this ran on every Execute call, four times per emulated
+	// microsecond, to answer a question that is asked once a session. The
+	// question is still open - see the note above srModeMask in the header -
+	// so it is switched out, not deleted.
+	if (shiftMode)
+		srModeMask |= (1 << shiftMode);
+#endif
 
 	switch (shiftMode)
 	{
@@ -313,7 +380,7 @@ void m6522::Execute()
 			{
 				// should output cb1OutputShiftClock onto cb1
 				shiftRegister <<= 1;
-				shiftRegister |= cb2;	// Should get from current cb2 (in a 1541 these pins on the VIAs are NC, measure at 5v and read as 1s)
+				shiftRegister |= cb2; srShiftsIn++;	// Should get from current cb2 (in a 1541 these pins on the VIAs are NC, measure at 5v and read as 1s)
 				if (++bitsShiftedSoFar == 8)
 					SetInterrupt(IR_SR);
 			}
@@ -327,7 +394,7 @@ void m6522::Execute()
 				// should output cb1OutputShiftClock onto cb1
 				cb1OutputShiftClock = !cb1OutputShiftClock;
 				shiftRegister <<= 1;
-				shiftRegister |= cb2;	// Should get from current cb2 (in a 1541 these pins on the VIAs are NC, measure at 5v and read as 1s)
+				shiftRegister |= cb2; srShiftsIn++;	// Should get from current cb2 (in a 1541 these pins on the VIAs are NC, measure at 5v and read as 1s)
 				if (++bitsShiftedSoFar == 8)
 					SetInterrupt(IR_SR);
 			}
@@ -341,9 +408,20 @@ void m6522::Execute()
 				if (!(bitsShiftedSoFar & 8))	// Shift register bug not implmented (would shift 9 bits?)
 				{
 					shiftRegister <<= 1;
-					shiftRegister |= cb2;	// Should get from current cb2 (in a 1541 these pins on the VIAs are NC, measure at 5v and read as 1s)
+					shiftRegister |= cb2; srShiftsIn++;	// Should get from current cb2 (in a 1541 these pins on the VIAs are NC, measure at 5v and read as 1s)
 					if (++bitsShiftedSoFar == 8)
+					{
 						SetInterrupt(IR_SR);
+						srBytesIn++;
+					}
+				}
+				else
+				{
+					// A clock edge with a full byte still sitting in the
+					// register. On the CMD HD's fast serial that is a bit the
+					// sender meant for the next byte and we have nowhere to put
+					// - the far end and this one have lost step.
+					srEdgesWhileFull++;
 				}
 			}
 		break;
@@ -351,7 +429,7 @@ void m6522::Execute()
 			if (shiftClockPositiveEdge)	// in this mode	the shift register counter is disabled.
 			{
 				cb2Shift = (shiftRegister & 0x80) != 0;
-				shiftRegister = (shiftRegister << 1) | cb2Shift;
+				shiftRegister = (shiftRegister << 1) | cb2Shift; srShiftsOut++;
 				// should output cb1OutputShiftClock onto cb1
 				// cb2Shift should output to cb2
 				//	- R/!W (on the 2nd VIA could be dangerous)
@@ -361,7 +439,7 @@ void m6522::Execute()
 			if ((t2TimedOutCount > 2) && shiftClockPositiveEdge && !(bitsShiftedSoFar & 8))
 			{
 				cb2Shift = (shiftRegister & 0x80) != 0;
-				shiftRegister = (shiftRegister << 1) | cb2Shift;
+				shiftRegister = (shiftRegister << 1) | cb2Shift; srShiftsOut++;
 				if (++bitsShiftedSoFar == 8)
 					SetInterrupt(IR_SR);
 				// should output cb1OutputShiftClock onto cb1
@@ -379,7 +457,7 @@ void m6522::Execute()
 				if (!cb1OutputShiftClock)
 				{
 					cb2Shift = (shiftRegister & 0x80) != 0;
-					shiftRegister = (shiftRegister << 1) | cb2Shift;
+					shiftRegister = (shiftRegister << 1) | cb2Shift; srShiftsOut++;
 					if (++bitsShiftedSoFar == 8)
 						SetInterrupt(IR_SR);
 				}
@@ -396,7 +474,7 @@ void m6522::Execute()
 					// should output cb1OutputShiftClock onto cb1
 					cb1OutputShiftClock = !cb1OutputShiftClock;
 					cb2Shift = (shiftRegister & 0x80) != 0;
-					shiftRegister = (shiftRegister << 1) | cb2Shift;
+					shiftRegister = (shiftRegister << 1) | cb2Shift; srShiftsOut++;
 					if (++bitsShiftedSoFar == 8)
 						SetInterrupt(IR_SR);
 					// cb2Shift should output to cb2
@@ -460,7 +538,10 @@ unsigned char m6522::Read(unsigned int address)
 		break;
 		case SR:
 			value = shiftRegister;
-			if (interruptFlagRegister & IR_SR) bitsShiftedSoFar = 0;
+			if (interruptFlagRegister & IR_SR)
+				bitsShiftedSoFar = 0;
+			else if (bitsShiftedSoFar)
+				srShortReads++;		// read mid byte: the rest arrives as ones
 			ClearInterrupt(IR_SR);
 		break;
 		case ACR:
@@ -566,6 +647,9 @@ void m6522::Write(unsigned int address, unsigned char value)
 			t1l.bytes.l = value;
 		break;
 		case T1CH:
+#if PICMD_SPLIT_CPUVIAS
+			diagStartedT1 = 1;
+#endif
 			// A write to TICH loads both the high order counter and high order latch with the same value.
 			// Simultaneously the T1LL contents are transferred to the low order counter and the count begins.
 			// If PB7 has been programmed as a TIMER 1 output it will go low on the phi2 following the write operation.
@@ -612,6 +696,9 @@ void m6522::Write(unsigned int address, unsigned char value)
 			t2Latch = value;
 		break;
 		case T2CH:
+#if PICMD_SPLIT_CPUVIAS
+			diagStartedT2 = 1;
+#endif
 			// Writing T2CH loads an 8 bit byte into the high order counter and latch (!!!there is no t2lh!!!) and simultaneously loads the low order latch into the low order counter, and the count down is initiated.
 			// If a T2 interrupt has occurred, the write operation will clear the T2 interrupt flag and reset !IRQ.
 			t2c.bytes.h = value;
@@ -632,6 +719,10 @@ void m6522::Write(unsigned int address, unsigned char value)
 			cb1OutputShiftClockPositiveEdge = false;
 		break;
 		case ACR:
+#if PICMD_SPLIT_CPUVIAS
+			diagWroteACR = 1;
+			diagAcrLast = value;
+#endif
 			//bool t1OutPB7Prev = (auxiliaryControlRegister & ACR_T1_OUT_PB7) != 0;
 			auxiliaryControlRegister = value;
 			latchPortA = (value & ACR_PA_LATCH_ENABLE) != 0;
@@ -704,6 +795,9 @@ void m6522::Write(unsigned int address, unsigned char value)
 			ClearInterrupt(value);
 		break;
 		case IER:
+#if PICMD_SPLIT_CPUVIAS
+			diagIerLast = value;
+#endif
 			// If bit 7 is a 0, each 1 in bits 6 through 0 clears the corresponding bit in the IER.
 			// For each zero in bits 6 through 0, the corresponding bit is unaffected.
 			if (value & IR_IRQ) interruptEnabledRegister |= value;
@@ -715,4 +809,7 @@ void m6522::Write(unsigned int address, unsigned char value)
 			WritePortA(value, false);
 		break;
 	}
+#if PICMD_VIA_IDLE_SKIP
+	UpdateIdleCache();
+#endif
 }

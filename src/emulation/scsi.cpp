@@ -2,7 +2,7 @@
 //
 // SCSI disk (target) emulation.
 // Ported from VICE's scsi.c written by Roberto Muscedere, adapted to
-// FatFS backed image files with a write-through sector cache.
+// FatFS backed image files with a write-back sector cache.
 //
 // This file is part of Pi1541.
 //
@@ -21,6 +21,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include "scsi.h"
 #include "debug.h"
 #include "rpihardware.h"
@@ -29,36 +30,50 @@
 #define MAXLUNS 8
 
 ///////////////////////////////////////////////////////////////////////////////
-// ScsiImage - a FatFS backed hard disk image with a write-through cache.
+// ScsiImage - a FatFS backed hard disk image with a write-back cache.
 ///////////////////////////////////////////////////////////////////////////////
 
 u8* ScsiImage::cachePool = 0;
 ScsiImage::CacheSlot* ScsiImage::cacheSlots = 0;
 u32 ScsiImage::numCacheSlots = 0;
-u8 ScsiImage::nextImageId = 0;
 
 void ScsiImage::InitCache(u32 sizeInBytes)
 {
 	if (cachePool)
 		return;
 
-	numCacheSlots = sizeInBytes >> CACHE_CHUNK_SHIFT;
-	if (numCacheSlots < 16)
-		numCacheSlots = 16;
+	u32 slots = sizeInBytes >> CACHE_CHUNK_SHIFT;
+	if (slots < 16)
+		slots = 16;
 
-	cachePool = (u8*)malloc(numCacheSlots * CACHE_CHUNK_SIZE);
-	cacheSlots = (CacheSlot*)malloc(numCacheSlots * sizeof(CacheSlot));
-
-	if (!cachePool || !cacheSlots)
+	// Settle for a smaller cache rather than none: with numCacheSlots at zero
+	// every single access goes to the card synchronously, which is exactly the
+	// stall the cache exists to avoid.
+	for (;;)
 	{
-		DEBUG_LOG("SCSI: failed to allocate %u byte cache\r\n", numCacheSlots * CACHE_CHUNK_SIZE);
+		cachePool = (u8*)malloc(slots * CACHE_CHUNK_SIZE);
+		cacheSlots = (CacheSlot*)malloc(slots * sizeof(CacheSlot));
+		if (cachePool && cacheSlots)
+			break;
+
 		free(cachePool);
 		free(cacheSlots);
 		cachePool = 0;
 		cacheSlots = 0;
-		numCacheSlots = 0;
-		return;
+
+		if (slots <= 16)
+		{
+			DEBUG_LOG("SCSI: failed to allocate %u byte cache\r\n", slots * CACHE_CHUNK_SIZE);
+			numCacheSlots = 0;
+			return;
+		}
+
+		slots >>= 1;
+		if (slots < 16)
+			slots = 16;
 	}
+
+	numCacheSlots = slots;
 
 	for (u32 i = 0; i < numCacheSlots; ++i)
 	{
@@ -88,7 +103,24 @@ bool ScsiImage::Attach(const char* filename, bool readOnly)
 	name[sizeof(name) - 1] = 0;
 	attached = true;
 	needSync = false;
-	imageId = nextImageId++;
+	// Take the lowest id no attached image is using, rather than counting up
+	// forever: the id is only 8 bits and it picks cache slots, so once it wraps
+	// two live images would answer to the same one and read each other's
+	// chunks - or get flushed through the wrong file handle. At most
+	// SCSI_MAX_DISKS are ever attached, so a free id always exists.
+	imageId = 0;
+	for (u32 i = 0; i < numAttachedImages; )
+	{
+		if (attachedImages[i]->imageId == imageId)
+		{
+			imageId++;
+			i = 0;		// start over; the new id may collide with an earlier one
+		}
+		else
+		{
+			i++;
+		}
+	}
 	if (numAttachedImages < 64)
 		attachedImages[numAttachedImages++] = this;
 
@@ -107,7 +139,16 @@ void ScsiImage::Detach()
 {
 	if (attached)
 	{
-		Sync(true);
+		// Retry before giving up. Below, every slot belonging to this image is
+		// invalidated, so whatever is still dirty at that point is gone - and
+		// this is the last chance to notice. A transient write error is worth
+		// a second attempt; a full card is not going to improve, but it is
+		// going to be reported instead of swallowed.
+		for (u32 attempt = 0; attempt < 3 && !Sync(true); ++attempt)
+			;
+		if (needSync)
+			unflushedSectors += DirtySectorCount();
+
 		f_close(&file);
 		attached = false;
 
@@ -122,6 +163,11 @@ void ScsiImage::Detach()
 		}
 		sizeInSectors = 0;
 
+		// Release the pinned region before invalidating, or the slots it covers
+		// would stay reserved for an image that is no longer here.
+		if (pinnedChunks && pinnedImage == imageId)
+			pinnedChunks = 0;
+
 		for (u32 i = 0; i < numCacheSlots; ++i)
 		{
 			if (cacheSlots[i].valid && cacheSlots[i].image == imageId)
@@ -130,10 +176,10 @@ void ScsiImage::Detach()
 	}
 }
 
-void ScsiImage::Sync(bool force)
+bool ScsiImage::Sync(bool force)
 {
 	if (!attached || !needSync)
-		return;
+		return true;
 
 	// Only ever flush on demand. This used to run on a timer from the SCSI
 	// state machine returning to BUSFREE - which is between commands, exactly
@@ -142,11 +188,32 @@ void ScsiImage::Sync(bool force)
 	// wait, so the drive vanished mid-transfer. Flushing now happens only when
 	// the bus has gone quiet (FlushIdle) or on detach.
 	if (!force)
-		return;
+		return true;
 
-	FlushAllDirty();
+	// needSync stays set when this fails, so the next quiet moment - or the
+	// next Detach - tries again rather than the data quietly ceasing to exist.
+	// No bound here: detach has to finish, and by then the bus is done with us.
+	if (FlushAllDirty(0, 0) != FLUSH_DONE)
+		return false;
+
 	f_sync(&file);
 	needSync = false;
+	return true;
+}
+
+// Sectors still marked dirty across every slot of this image: what would be
+// thrown away if the slots were invalidated right now.
+u32 ScsiImage::DirtySectorCount()
+{
+	u32 n = 0;
+	for (u32 i = 0; i < numCacheSlots; ++i)
+	{
+		if (!(cacheSlots[i].valid && cacheSlots[i].image == imageId))
+			continue;
+		u8 m = cacheSlots[i].dirtyMask;
+		while (m) { n += (m & 1); m >>= 1; }
+	}
+	return n;
 }
 
 ScsiImage::CacheSlot* ScsiImage::FindSlot(u32 chunkIndex, bool allocate)
@@ -154,9 +221,20 @@ ScsiImage::CacheSlot* ScsiImage::FindSlot(u32 chunkIndex, bool allocate)
 	if (!cacheSlots)
 		return 0;
 
-	// 2-way set associative on a multiplicative hash.
-	u32 hash = (chunkIndex * 2654435761u + imageId * 40503u) % numCacheSlots;
-	u32 hash2 = (hash + 1) % numCacheSlots;
+	// Pinned region. Chunk N of the preloaded image lives in slot N and nowhere
+	// else, so nothing can ever evict it and no access to it can reach the
+	// card. A hash would not do: 4096 chunks scattered over 16384 slots two
+	// ways deep still collide often enough to leave a few hundred holes, and
+	// one hole in the wrong place is the whole bug.
+	if (pinnedChunks && imageId == pinnedImage && chunkIndex < pinnedChunks)
+		return &cacheSlots[chunkIndex];
+
+	// 2-way set associative on a multiplicative hash, over whatever is left.
+	u32 span = numCacheSlots - pinnedChunks;
+	if (!span)
+		return 0;
+	u32 hash = pinnedChunks + (chunkIndex * 2654435761u + imageId * 40503u) % span;
+	u32 hash2 = pinnedChunks + (hash + 1 - pinnedChunks) % span;
 
 	CacheSlot* slot = &cacheSlots[hash];
 	if (slot->valid && slot->image == imageId && slot->chunkIndex == chunkIndex)
@@ -168,17 +246,39 @@ ScsiImage::CacheSlot* ScsiImage::FindSlot(u32 chunkIndex, bool allocate)
 	if (!allocate)
 		return 0;
 
-	// Prefer replacing an invalid slot.
-	CacheSlot* victim = slot->valid ? (slot2->valid ? slot : slot2) : slot;
+	// Prefer an unused slot, then a clean one. Evicting a dirty chunk means a
+	// synchronous write to the card from whatever called us - including
+	// WriteSector, which must not go near it while the computer is polling for
+	// status. Only pick a dirty victim when the whole set is dirty.
+	CacheSlot* victim;
+	if (!slot->valid)
+		victim = slot;
+	else if (!slot2->valid)
+		victim = slot2;
+	else if (!slot->dirtyMask)
+		victim = slot;
+	else
+		victim = slot2;
 
 	// Never drop writes on the floor. The chunk being evicted may belong to
 	// another image, so flush it through whoever owns it.
+	//
+	// This is the one path that can still put an SD write in the middle of a
+	// WriteSector, contradicting the promise made there. It only happens when
+	// every way of the set is dirty, which in turn only happens when FlushIdle
+	// has not had a quiet moment to run - exactly the case during a long
+	// transfer. Count it so it stops being guesswork.
 	if (victim->valid && victim->dirtyMask)
 	{
+		dirtyEvictions++;
 		ScsiImage* owner = ImageById(victim->image);
-		if (owner)
-			owner->FlushChunk(*victim);
-		victim->dirtyMask = 0;
+		if (!owner || owner->FlushChunk(*victim) != 0)
+		{
+			// The card would not take it. Leave the chunk dirty so a later
+			// flush can try again and hand the caller nothing, which sends it
+			// straight to the file - losing the sectors here would be silent.
+			return 0;
+		}
 	}
 
 	victim->valid = 0;
@@ -193,19 +293,336 @@ ScsiImage* ScsiImage::attachedImages[64] = { 0 };
 u32 ScsiImage::numAttachedImages = 0;
 u32 ScsiImage::worstStallMicros = 0;
 u32 ScsiImage::accessCounter = 0;
+u32 ScsiImage::dirtyEvictions = 0;
+u32 ScsiImage::cacheReadHits = 0;
+u32 ScsiImage::cacheReadMisses = 0;
+u32 ScsiImage::dirtyChunkReads = 0;
+u32 ScsiImage::dirtyChunkPartialFills = 0;
 
-void ScsiImage::FlushIdle()
+#if PICMD_ACCESS_FORENSICS
+ScsiImage::AccessLogEntry ScsiImage::accessLog[ScsiImage::ACCESS_LOG_ENTRIES];
+u32 ScsiImage::accessLogCount = 0;
+#endif
+u32 ScsiImage::maxLbaWritten = 0;
+
+void ScsiImage::ResetCounters()
+{
+	worstStallMicros = 0;
+	dirtyEvictions = 0;
+	cacheReadHits = 0;
+	cacheReadMisses = 0;
+	dirtyChunkReads = 0;
+	dirtyChunkPartialFills = 0;
+	bitRotWrites = 0;
+	bitRotBytes = 0;
+	bitRotFirstLba = 0;
+	bitRotMask = 0;
+#if PICMD_ACCESS_FORENSICS
+	accessLogCount = 0;
+#endif
+	maxLbaWritten = 0;
+#if PICMD_ACCESS_FORENSICS
+	writeLogCount = 0;
+#endif
+}
+
+u32 ScsiImage::unflushedSectors = 0;
+u32 ScsiImage::bitRotWrites = 0;
+u32 ScsiImage::bitRotBytes = 0;
+u32 ScsiImage::bitRotFirstLba = 0;
+u8 ScsiImage::bitRotMask = 0;
+
+u32 ScsiImage::pinnedChunks = 0;
+u8 ScsiImage::pinnedImage = 0;
+
+// Read the front of the image into slots 0..n-1 and pin it there. Called at
+// mount, with the bus quiet and nobody waiting on us, so the cost of going to
+// the card is paid once instead of arriving in the middle of a transfer.
+//
+// Every chunk this covers is one fewer 35ms freeze, and a freeze is what makes
+// the computer decide the drive is not there.
+u32 ScsiImage::PreloadCache(u32 maxBytes, volatile u32* progressSectors, volatile u32* totalSectors)
+{
+	if (!cacheSlots || !attached || !maxBytes)
+		return 0;
+
+	// Leave a quarter of the cache hashed, so other images and anything past
+	// the preloaded region still have somewhere to go.
+	u32 chunks = maxBytes >> CACHE_CHUNK_SHIFT;
+	u32 imageChunks = (sizeInSectors + SECTORS_PER_CHUNK - 1) / SECTORS_PER_CHUNK;
+	u32 limit = numCacheSlots - (numCacheSlots >> 2);
+	if (chunks > imageChunks)
+		chunks = imageChunks;
+	if (chunks > limit)
+		chunks = limit;
+	if (!chunks)
+		return 0;
+
+	// Claim the region before filling it, so FindSlot hands back slot N for
+	// chunk N as each one lands.
+	pinnedChunks = chunks;
+	pinnedImage = imageId;
+
+	if (totalSectors)
+		*totalSectors = chunks * SECTORS_PER_CHUNK;
+
+	// Chunk N is pinned to slot N and slot N's data is cachePool + N*4K, so the
+	// whole region is contiguous in memory as well as in the file. Read it in
+	// big blocks: chunk at a time meant thousands of separate seeks and reads,
+	// which at this card's latency turned the mount into minutes.
+	const u32 BLOCK = 1u << 20;
+	u32 wanted = chunks * CACHE_CHUNK_SIZE;
+	u32 done = 0;
+
+	if (f_lseek(&file, 0) != FR_OK)
+	{
+		pinnedChunks = 0;
+		if (totalSectors)
+			*totalSectors = 0;
+		return 0;
+	}
+
+	while (done < wanted)
+	{
+		u32 ask = wanted - done;
+		if (ask > BLOCK)
+			ask = BLOCK;
+
+		UINT got = 0;
+		if (f_read(&file, cachePool + done, ask, &got) != FR_OK)
+			break;
+
+		done += got;
+		if (progressSectors)
+			*progressSectors = done / SECTOR_SIZE;
+
+		if (got < ask)
+			break;			// end of file
+	}
+
+	// Anything the file did not cover reads as zeros, the same contract
+	// FillChunk honours past EOF.
+	if (done < wanted)
+		memset(cachePool + done, 0, wanted - done);
+
+	u32 loaded = done >> CACHE_CHUNK_SHIFT;
+
+	for (u32 i = 0; i < chunks; ++i)
+	{
+		CacheSlot& slot = cacheSlots[i];
+		slot.image = imageId;
+		slot.chunkIndex = i;
+		slot.dirtyMask = 0;
+		// Only whole chunks that actually arrived are presented as valid. A
+		// partial tail is left cold so the first read fills it the usual way
+		// rather than serving a half read chunk as if it were real.
+		if (i < loaded)
+		{
+			slot.valid = 1;
+			slot.validMask = 0xff;
+		}
+		else
+		{
+			slot.valid = 0;
+			slot.validMask = 0;
+		}
+	}
+
+	if (totalSectors)
+		*totalSectors = 0;
+
+	DEBUG_LOG("SCSI: preloaded %u of %u chunks (%u KB pinned)\r\n",
+		loaded, chunks, (chunks * CACHE_CHUNK_SIZE) >> 10);
+	return loaded;
+}
+
+#if PICMD_ACCESS_FORENSICS
+u8 ScsiImage::writeLogData[ScsiImage::WRITE_LOG_ENTRIES][ScsiImage::SECTOR_SIZE];
+u32 ScsiImage::writeLogLba[ScsiImage::WRITE_LOG_ENTRIES];
+u32 ScsiImage::writeLogSeq[ScsiImage::WRITE_LOG_ENTRIES];
+u32 ScsiImage::writeLogCount = 0;
+#endif
+
+// snprintf returns what it would have written, not what it did. Handing that
+// to f_write walks off the end of the buffer.
+static UINT Clamp(int produced, size_t capacity)
+{
+	if (produced < 0)
+		return 0;
+	return (UINT)((size_t)produced < capacity ? (size_t)produced : capacity - 1);
+}
+
+#if PICMD_ACCESS_FORENSICS
+// Every write as it was handed to us, payload and all. Dumped on eject next to
+// the address log, so the two can be lined up by sequence number.
+bool ScsiImage::DumpWriteLog(const char* prefix)
+{
+	if (writeLogCount == 0)
+		return false;
+
+	char filename[64];
+	FILINFO fno;
+	unsigned serial = 0;
+	for (;; ++serial)
+	{
+		if (serial > 99)
+			return false;
+		snprintf(filename, sizeof(filename), "%s%02u.LOG", prefix, serial);
+		if (f_stat(filename, &fno) != FR_OK)
+			break;
+	}
+
+	FIL fp;
+	if (f_open(&fp, filename, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK)
+		return false;
+
+	char line[160];
+	UINT written;
+	bool wrapped = writeLogCount > WRITE_LOG_ENTRIES;
+	u32 held = wrapped ? WRITE_LOG_ENTRIES : writeLogCount;
+	u32 first = wrapped ? writeLogCount - WRITE_LOG_ENTRIES : 0;
+
+	int n = snprintf(line, sizeof(line), "# %u writes, %u held%s\r\n",
+		writeLogCount, held, wrapped ? " (wrapped, oldest lost)" : "");
+	f_write(&fp, line, Clamp(n, sizeof(line)), &written);
+
+	for (u32 i = 0; i < held; ++i)
+	{
+		u32 slot = (first + i) % WRITE_LOG_ENTRIES;
+		n = snprintf(line, sizeof(line), "W %u lba %u\r\n",
+			writeLogSeq[slot], writeLogLba[slot]);
+		if (f_write(&fp, line, Clamp(n, sizeof(line)), &written) != FR_OK)
+			break;
+
+		const u8* d = writeLogData[slot];
+		for (u32 off = 0; off < SECTOR_SIZE; off += 32)
+		{
+			n = snprintf(line, sizeof(line), "%03x:", off);
+			for (u32 j = 0; j < 32; ++j)
+				n += snprintf(line + n, sizeof(line) - n, "%02x", d[off + j]);
+			n += snprintf(line + n, sizeof(line) - n, "\r\n");
+			if (f_write(&fp, line, Clamp(n, sizeof(line)), &written) != FR_OK)
+			{
+				f_close(&fp);
+				return false;
+			}
+		}
+	}
+
+	f_close(&fp);
+	return true;
+}
+#endif
+
+#if PICMD_ACCESS_FORENSICS
+void ScsiImage::LogAccess(u32 lba, u8 op, u8 result)
+{
+	accessLog[accessLogCount % ACCESS_LOG_ENTRIES].lba = lba;
+	accessLog[accessLogCount % ACCESS_LOG_ENTRIES].op = op;
+	accessLog[accessLogCount % ACCESS_LOG_ENTRIES].image = imageId;
+	accessLog[accessLogCount % ACCESS_LOG_ENTRIES].result = result;
+	accessLogCount++;
+
+	if (op == 'W' && result == 0 && lba > maxLbaWritten)
+		maxLbaWritten = lba;
+}
+#endif
+
+#if PICMD_ACCESS_FORENSICS
+// Write the log out as text. Only ever called from eject, when the bus is
+// already done with us and a slow card costs nothing.
+//
+// The name gets a two digit serial because eject is also how you get back to
+// the file browser: going back in to look at the result of a run and coming
+// out again would otherwise overwrite the run you wanted to keep.
+bool ScsiImage::DumpAccessLog(const char* prefix)
+{
+	if (accessLogCount == 0)
+		return false;
+
+	char filename[64];
+	FILINFO fno;
+	unsigned serial = 0;
+	for (;; ++serial)
+	{
+		if (serial > 99)
+			return false;		// 100 runs without emptying the card; give up
+		snprintf(filename, sizeof(filename), "%s%02u.LOG", prefix, serial);
+		if (f_stat(filename, &fno) != FR_OK)
+			break;				// free name
+	}
+
+	FIL fp;
+	if (f_open(&fp, filename, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK)
+		return false;
+
+	char line[128];
+	UINT written;
+	bool wrapped = accessLogCount > ACCESS_LOG_ENTRIES;
+	u32 held = wrapped ? ACCESS_LOG_ENTRIES : accessLogCount;
+	u32 first = wrapped ? accessLogCount - ACCESS_LOG_ENTRIES : 0;
+
+	// Two lines, written separately: together they overrun a 128 byte buffer,
+	// and snprintf reports the length it wanted rather than the length it
+	// produced - so handing that straight to f_write read off the end of the
+	// array and put rubbish in the header.
+	int n = snprintf(line, sizeof(line),
+		"# seq op lba image result   (op: R cached read, W write, U uncached read)\r\n");
+	f_write(&fp, line, Clamp(n, sizeof(line)), &written);
+	n = snprintf(line, sizeof(line), "# %u accesses, %u held%s, max lba written %u\r\n",
+		accessLogCount, held, wrapped ? " (wrapped, oldest lost)" : "", maxLbaWritten);
+	f_write(&fp, line, Clamp(n, sizeof(line)), &written);
+
+	for (u32 i = 0; i < held; ++i)
+	{
+		const AccessLogEntry& e = accessLog[(first + i) % ACCESS_LOG_ENTRIES];
+		n = snprintf(line, sizeof(line), "%u %c %u %u %u\r\n",
+			first + i, (char)e.op, e.lba, (unsigned)e.image, (unsigned)e.result);
+		UINT len = Clamp(n, sizeof(line));
+		if (f_write(&fp, line, len, &written) != FR_OK || written != len)
+		{
+			f_close(&fp);
+			return false;
+		}
+	}
+
+	f_close(&fp);
+	return true;
+}
+#endif
+
+// Returns true only when there is nothing left owed anywhere. False means come
+// back - the bus asked for the drive, a write failed, or the per-visit bound
+// was reached - and needSync is still set on whatever is left.
+ScsiImage::FlushResult ScsiImage::FlushIdle(bool (*abort)())
 {
 	for (u32 i = 0; i < numAttachedImages; ++i)
 	{
 		ScsiImage* img = attachedImages[i];
 		if (img && img->attached && img->needSync)
 		{
-			img->FlushAllDirty();
+			// Stop the moment the bus wants us again rather than finishing the
+			// backlog regardless. f_sync only once there is nothing left, or it
+			// would be paying for metadata on every partial drain.
+			FlushResult r = img->FlushAllDirty(abort, IDLE_FLUSH_CHUNKS);
+			if (r != FLUSH_DONE)
+				return r;
 			f_sync(&img->file);
 			img->needSync = false;
 		}
 	}
+	return FLUSH_DONE;
+}
+
+u32 ScsiImage::DirtyChunkCount()
+{
+	u32 n = 0;
+	for (u32 i = 0; i < numCacheSlots; ++i)
+	{
+		if (cacheSlots[i].valid && cacheSlots[i].dirtyMask)
+			n++;
+	}
+	return n;
 }
 
 ScsiImage* ScsiImage::ImageById(u8 id)
@@ -251,14 +668,20 @@ int ScsiImage::ReadSector(u32 lba, u8* buffer)
 {
 	accessCounter++;
 	if (!attached)
+	{
+		LogAccess(lba, 'R', 1);
 		return -1;
+	}
 
 	if (lba >= sizeInSectors)
 	{
 		// Reads beyond the end of the image return zeros (matches VICE).
+		LogAccess(lba, 'R', 1);
 		memset(buffer, 0, SECTOR_SIZE);
 		return 0;
 	}
+
+	LogAccess(lba, 'R', 0);
 
 	u32 chunkIndex = lba / SECTORS_PER_CHUNK;
 	u32 sectorInChunk = lba % SECTORS_PER_CHUNK;
@@ -267,7 +690,9 @@ int ScsiImage::ReadSector(u32 lba, u8* buffer)
 	CacheSlot* slot = FindSlot(chunkIndex, true);
 	if (!slot)
 	{
-		// No cache; read straight through.
+		// No cache, or the set was full of chunks the card would not take.
+		// Either way, read straight through.
+		cacheReadMisses++;
 		UINT bytesRead = 0;
 		u32 t0 = read32(ARM_SYSTIMER_CLO);
 		if (f_lseek(&file, (u64)lba << 9) != FR_OK)
@@ -280,8 +705,18 @@ int ScsiImage::ReadSector(u32 lba, u8* buffer)
 		return 0;
 	}
 
-	if (!(slot->validMask & bit))
+	// Sampled before anything below can clear it. Note FillChunk only ever runs
+	// with dirtyMask already zero, so it cannot race this.
+	if (slot->dirtyMask)
+		dirtyChunkReads++;
+
+	if (slot->validMask & bit)
 	{
+		cacheReadHits++;
+	}
+	else
+	{
+		cacheReadMisses++;
 		if (slot->dirtyMask == 0)
 		{
 			// Nothing to lose, so pull the whole chunk in and keep the
@@ -296,6 +731,7 @@ int ScsiImage::ReadSector(u32 lba, u8* buffer)
 		{
 			// Part of this chunk is written but not yet on the card, so a
 			// whole-chunk read would clobber it. Fetch just this sector.
+			dirtyChunkPartialFills++;
 			UINT bytesRead = 0;
 			u32 t0 = read32(ARM_SYSTIMER_CLO);
 			if (f_lseek(&file, (u64)lba << 9) != FR_OK)
@@ -319,20 +755,29 @@ int ScsiImage::ReadSectorUncached(u32 lba, u8* buffer)
 {
 	accessCounter++;
 	if (!attached)
+	{
+		LogAccess(lba, 'U', 1);
 		return -1;
+	}
 
 	if (lba >= sizeInSectors)
 	{
+		LogAccess(lba, 'U', 1);
 		memset(buffer, 0, SECTOR_SIZE);
 		return 0;
 	}
 
+	LogAccess(lba, 'U', 0);
+
 	// If the sector happens to be cached, take it from there - but never fill
-	// the cache on its account.
+	// the cache on its account. A slot being valid only says the chunk is
+	// allocated: a write leaves the other seven sectors of it holding whatever
+	// was there before, so the per sector bit has to be checked as well.
+	u32 sectorInChunk = lba % SECTORS_PER_CHUNK;
 	CacheSlot* slot = FindSlot(lba / SECTORS_PER_CHUNK, false);
-	if (slot && slot->valid)
+	if (slot && slot->valid && (slot->validMask & (1 << sectorInChunk)))
 	{
-		memcpy(buffer, slot->data + (lba % SECTORS_PER_CHUNK) * SECTOR_SIZE, SECTOR_SIZE);
+		memcpy(buffer, slot->data + sectorInChunk * SECTOR_SIZE, SECTOR_SIZE);
 		return 0;
 	}
 
@@ -348,10 +793,30 @@ int ScsiImage::WriteSector(u32 lba, const u8* buffer)
 {
 	accessCounter++;
 	if (!attached || readOnly)
+	{
+		LogAccess(lba, 'W', 1);
 		return -1;
+	}
 
 	if (lba >= sizeInSectors)
+	{
+		LogAccess(lba, 'W', 1);
 		return -1;
+	}
+
+	LogAccess(lba, 'W', 0);
+
+#if PICMD_WRITE_FORENSICS
+	// Keep the payload too. accessLogCount has just been bumped past this
+	// access, so seq-1 is the entry in the address log that matches.
+	{
+		u32 slot = writeLogCount % WRITE_LOG_ENTRIES;
+		memcpy(writeLogData[slot], buffer, SECTOR_SIZE);
+		writeLogLba[slot] = lba;
+		writeLogSeq[slot] = accessLogCount - 1;
+		writeLogCount++;
+	}
+#endif
 
 	u32 chunkIndex = lba / SECTORS_PER_CHUNK;
 	u32 sectorInChunk = lba % SECTORS_PER_CHUNK;
@@ -368,6 +833,38 @@ int ScsiImage::WriteSector(u32 lba, const u8* buffer)
 			slot->validMask = 0;
 			slot->dirtyMask = 0;
 		}
+#if PICMD_WRITE_FORENSICS
+		// Before it is overwritten, ask what changed. See BitRotWrites in the
+		// header: bytes that only ever gain bits 0 and 1 are the corruption,
+		// and this is the one place the before and after are both to hand.
+		if (slot->validMask & (1 << sectorInChunk))
+		{
+			const u8* was = slot->data + sectorInChunk * SECTOR_SIZE;
+			u32 differing = 0;
+			u32 gainedLowBits = 0;
+			u8 gained = 0;
+			for (u32 i = 0; i < SECTOR_SIZE; i++)
+			{
+				if (was[i] == buffer[i])
+					continue;
+				differing++;
+				if ((u8)(buffer[i] & 0xfc) == was[i])
+				{
+					gainedLowBits++;
+					gained |= (u8)(buffer[i] ^ was[i]);
+				}
+			}
+			if (differing >= 3 && gainedLowBits == differing)
+			{
+				if (!bitRotWrites)
+					bitRotFirstLba = lba;
+				bitRotWrites++;
+				bitRotBytes += gainedLowBits;
+				bitRotMask |= gained;
+			}
+		}
+#endif
+
 		memcpy(slot->data + sectorInChunk * SECTOR_SIZE, buffer, SECTOR_SIZE);
 		slot->validMask |= (u8)(1 << sectorInChunk);
 		slot->dirtyMask |= (u8)(1 << sectorInChunk);
@@ -408,7 +905,11 @@ int ScsiImage::FlushChunk(CacheSlot& slot)
 		u64 offset = ((u64)slot.chunkIndex << CACHE_CHUNK_SHIFT) + (u64)s * SECTOR_SIZE;
 		if (f_lseek(&file, offset) != FR_OK)
 			return -1;
-		if (f_write(&file, slot.data + s * SECTOR_SIZE, run * SECTOR_SIZE, &written) != FR_OK)
+		// A short write is not an error as far as FatFS is concerned - a full
+		// card returns FR_OK having written less than asked. Treat it as one,
+		// or the caller clears dirtyMask on sectors that never reached the SD.
+		if (f_write(&file, slot.data + s * SECTOR_SIZE, run * SECTOR_SIZE, &written) != FR_OK
+			|| written != run * SECTOR_SIZE)
 			return -1;
 		NoteStall(t0);
 		s += run;
@@ -418,13 +919,45 @@ int ScsiImage::FlushChunk(CacheSlot& slot)
 	return 0;
 }
 
-void ScsiImage::FlushAllDirty()
+ScsiImage::FlushResult ScsiImage::FlushAllDirty(bool (*abort)(), u32 maxChunks)
 {
+	u32 done = 0;
+
 	for (u32 i = 0; i < numCacheSlots; ++i)
 	{
-		if (cacheSlots[i].valid && cacheSlots[i].dirtyMask && cacheSlots[i].image == imageId)
-			FlushChunk(cacheSlots[i]);
+		if (!(cacheSlots[i].valid && cacheSlots[i].dirtyMask && cacheSlots[i].image == imageId))
+			continue;
+		// Asked before committing to the write, not after: once FlushChunk is
+		// under way the CPU is frozen for as long as the card takes.
+		//
+		// And asked BEFORE the bound below, not after. The other order looks
+		// harmless and is not: with a bound of one chunk the function would
+		// return at the second dirty slot without ever evaluating abort, so
+		// the callback would become a thing that cannot fire - which is the
+		// failure mode this project has documented three times.
+		if (abort && abort())
+			return FLUSH_STOPPED;
+
+		// Stop after maxChunks and let the caller come back. The emulated CPU
+		// is frozen for every card write in this loop, and unbounded that came
+		// to 48 milliseconds in one go on a GEOS installation - measured, the
+		// worst overrun in PICMD-LST37.LOG. A bound turns one long freeze into
+		// several short ones with the loop running in between. maxChunks == 0
+		// means no bound, for detach, where finishing matters more than
+		// latency.
+		if (maxChunks && done >= maxChunks)
+			return FLUSH_MORE;
+		// FlushChunk leaves dirtyMask set on purpose when the write did not
+		// land, so the caller can come back for it. Dropping the return here
+		// turned that into "we tried once and then forgot": Sync cleared
+		// needSync on the strength of a true that meant nothing, and Detach
+		// invalidated the slots underneath. A full or failing card lost the
+		// user's sectors without a word.
+		if (FlushChunk(cacheSlots[i]) != 0)
+			return FLUSH_STOPPED;
+		++done;
 	}
+	return FLUSH_DONE;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -723,7 +1256,11 @@ void scsi_process_ack(scsi_context_t* context)
 		{
 			context->io = 0;
 			context->cd = 0;
-			context->data_buf[context->seq] = data;
+			// seq is the index, and it is bumped past the end deliberately to
+			// mark a full buffer - and REASSIGN BLOCKS below parks it there
+			// outright - so it has to be checked before it is used, not after.
+			if (context->seq < sizeof(context->data_buf))
+				context->data_buf[context->seq] = data;
 			context->seq++;
 			if (context->seq >= context->data_max)
 			{
@@ -792,9 +1329,9 @@ void scsi_process_ack(scsi_context_t* context)
 							(context->data_buf[1] << 16) |
 							(context->data_buf[2] << 8) |
 							(context->data_buf[3])) + 4;
-						if (context->seq > 512)
+						if (context->seq >= sizeof(context->data_buf))
 						{
-							context->seq = 512;
+							context->seq = sizeof(context->data_buf) - 1;
 						}
 					}
 					else
@@ -1233,15 +1770,11 @@ void scsi_process_ack(scsi_context_t* context)
 	}
 
 out:
-	// Flush FatFS metadata whenever we return to the status phase after writes.
-	if (context->state == SCSI_STATE_BUSFREE)
-	{
-		for (int d = 0; d < SCSI_MAX_DISKS; ++d)
-		{
-			if (context->file[d])
-				context->file[d]->Sync();
-		}
-	}
+	// Nothing is flushed here on purpose. This used to sweep every image on the
+	// way back to BUSFREE, which is precisely when the computer polls us for
+	// status - see the note on ScsiImage::Sync. The sweep had in fact been dead
+	// for a while, because Sync() without force returns immediately; it is gone
+	// now so the next reader is not misled into thinking writes land here.
 	return;
 }
 

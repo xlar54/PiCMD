@@ -837,14 +837,19 @@ bool FileBrowser::CheckForPNG(const char* filename, FILINFO& filIcon)
 		char* ptr = strrchr(filename, '.');
 		if (ptr)
 		{
-			int len = ptr - filename;
-			strncpy(fileName, filename, len);
-			fileName[len] = 0;
+			// Long file names are on (_MAX_LFN is 255), so the stem can be as
+			// long as this buffer on its own. It has to leave room for ".png"
+			// and the terminator, and a name that does not is simply one we
+			// cannot have an icon for.
+			size_t len = (size_t)(ptr - filename);
+			if (len + sizeof(".png") <= sizeof(fileName))
+			{
+				memcpy(fileName, filename, len);
+				strcpy(fileName + len, ".png");
 
-			strcat(fileName, ".png");
-
-			if (f_stat(fileName, &filIcon) == FR_OK)
-				foundValid = true;
+				if (f_stat(fileName, &filIcon) == FR_OK)
+					foundValid = true;
+			}
 		}
 	}
 	return foundValid;

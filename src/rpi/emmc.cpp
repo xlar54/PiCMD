@@ -1979,37 +1979,44 @@ int CEMMCDevice::DoWrite(u8 *buf, size_t buf_size, u32 block_no)
 
 void (*EMMCBlockingWaitHook)(void) = 0;
 
+// How often the blocking-wait hook gets a turn, in microseconds. The point of
+// the hook is to keep the serial bus alive while the card is busy, and the bus
+// tolerates being ignored for far longer than this.
+#define EMMC_HOOK_INTERVAL_US 100
+
 int CEMMCDevice::TimeoutWait(unsigned reg, unsigned mask, int value, unsigned usec)
 {
-	unsigned nCount = usec / 1000;
+	// Poll as fast as the peripheral will answer. This used to sleep a whole
+	// millisecond between looks, which kept the overall timeout right but made
+	// every wait cost a millisecond even when the card was ready in tens of
+	// microseconds - and a single block transfer goes through several of them
+	// (command complete, data ready per block, transfer complete). That, not
+	// the card, was most of the tens of milliseconds an SD access was measured
+	// at, and everything above this driver is built to work around that number.
+	unsigned start = read32(ARM_SYSTIMER_CLO);
+	unsigned lastService = start;
 
-	do
+	for (;;)
 	{
-		delay_us(1);
-
 		if ((read32(reg) & mask) ? value : !value)
 		{
 			return 0;
 		}
 
-		// Wait out the rest of the millisecond in short steps, giving whoever
-		// registered the hook a chance to keep the outside world serviced.
-		// Without this the emulated drive goes deaf for the whole access and
-		// the computer decides it has been unplugged.
-		if (EMMCBlockingWaitHook)
+		unsigned now = read32(ARM_SYSTIMER_CLO);
+
+		if (now - start >= usec)
 		{
-			for (int i = 0; i < 10; ++i)
-			{
-				EMMCBlockingWaitHook();
-				delay_us(99);
-			}
+			return -1;
 		}
-		else
+
+		// Give whoever registered the hook a turn. Without this the emulated
+		// drive goes deaf for the whole access and the computer decides it has
+		// been unplugged.
+		if (EMMCBlockingWaitHook && (now - lastService) >= EMMC_HOOK_INTERVAL_US)
 		{
-			delay_us(999);
+			lastService = now;
+			EMMCBlockingWaitHook();
 		}
 	}
-	while(nCount--);
-
-	return -1;
 }

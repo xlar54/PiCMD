@@ -37,13 +37,15 @@
 #include "rtc72421.h"
 #include "scsi.h"
 
+
 class PiCMDHD
 {
 public:
 	PiCMDHD();
 
 	void Initialise();
-	void Update();		// One 2MHz CPU cycle worth of house keeping.
+	void Update();
+	void SlowTick(u32 emulatedCycles);		// One 2MHz CPU cycle worth of house keeping.
 	void Reset();
 
 	// Attach the DHD image (SCSI ID 0 LUN 0) plus any companion .sXY files.
@@ -130,6 +132,90 @@ public:
 	// patched to this unit number on the fly (VICE behaviour). If zero the
 	// image's own device number is respected.
 	void SetForcedDeviceID(u8 id) { forcedDeviceID = id; }
+	// Megabytes of the image to pull into the cache at mount. Must be set
+	// before Insert; 0 leaves the cache cold.
+	void SetPreloadMB(unsigned mb) { preloadMB = mb; }
+
+	// What the SCSI data bus offered on a port A read against what the CPU
+	// actually took away. m6522::ReadPortA returns
+	// (input & ~ddr) | (output & ddr), and the bus only ever arrives through
+	// SetInput, so any DDRA bit still set as an output silently serves the
+	// port's own stale latch in place of a real bus bit. The bus is inverted
+	// (scsi_process_ack does databus ^ 0xff), so a zero smuggled in that way
+	// reaches the sector buffer as a one - which is exactly the | 0x03 that
+	// has been eating the BAM and directory sectors. Counted only while the
+	// target drives the bus.
+	//   Xor  = every bit that has ever differed.
+	//   Ddr  = of those, the ones DDRA had as outputs. Equal to Xor means the
+	//          direction merge explains all of it; zero with mismatches means
+	//          it is the CA1 latch path instead.
+	// Microseconds the main loop overran its 1us budget. Pi1541 has always had
+	// the test for this in main.cpp with an empty body and a commented-out
+	// log, beside its author's note that it can make emulation fail inside
+	// critical communication loops. This build exists to measure it with
+	// NOTHING else added, so the number cannot be blamed on the
+	// investigation's own instrumentation.
+	// Split of the cpu+vias section, which is 669 of the loop's ~1120 real
+	// cycles and has always been one opaque number. Diagnostic only: it adds
+	// four more coprocessor reads per emulated CPU cycle, so a kernel built
+	// with it WILL overrun the microsecond and the drive will misbehave. That
+	// is fine - the point is the ratio between the parts, not a working drive.
+	// Mount, open a directory, eject, read the numbers, build it out again.
+	//   0 = m65c02::Step   1 = via9+via10 Execute   2 = rest of Update
+	// Behind the switch so that turning it off rebuilds the deployed kernel
+	// byte for byte rather than merely equivalently.
+#if PICMD_SPLIT_CPUVIAS
+	static u64 subCycles[3];
+	static u32 subSamples;
+
+	// M2: what a blocking read of Device memory actually costs. The figure
+	// "about 100 cycles for read32(ARM_GPIO_GPLEV0)" is a premise in three
+	// separate arguments in this investigation and has never been measured
+	// once. Run at mount, outside the emulation loop, so it costs the loop
+	// nothing.
+	//   0 = GPLEV0 read, result used immediately
+	//   1 = the same ALU filler with no read at all, as the baseline
+	//   2 = GPLEV0 read with the filler between issue and use
+	//   3 = ARM_SYSTIMER_CLO read, result used immediately
+	// If 2 comes out near max(0,1) rather than near 0+1, the A53 keeps the
+	// Device load in flight and a second bus sample could be issued early and
+	// consumed late for almost nothing - which would end the budget problem.
+	static u32 diagReadCost[4];
+#endif
+
+	static u32 lostCycles;
+	static u32 worstLostUs;
+	// ARM clock in Hz as the firmware reported it at boot. The cycles-per-loop
+	// figures below mean nothing without it.
+	static u32 armClockHz;
+	// Count and worst-case say nothing about shape, and shape is what decides
+	// this: thousands of one-microsecond slips is a different fault from a
+	// handful of thirteen-microsecond stalls. Bucket by overrun size, and
+	// count every iteration so the rate can be stated as a fraction rather
+	// than as a bare million.
+	static u32 lostHist[16];
+	// u64, not u32: at one increment per emulated microsecond a 32 bit counter
+	// wraps after 71 minutes 35 seconds, and sectionCycles is already u64 - so
+	// past that point the divisor restarts while the dividend keeps going and
+	// every cycles/loop average and the overrun rate turn to nonsense, quietly.
+	// A GDOS64 installation plus a few GEOS tests passes an hour without
+	// trying, and this counter is the denominator of the whole acceptance test.
+	static u64 loopIterations;
+
+	// Where the microsecond actually goes. Skipping the two redundant GPIO
+	// writes moved the overrun rate from 63 to 62 per mille, i.e. nowhere, so
+	// the cost is elsewhere and guessing again would be a fourth wrong guess.
+	// The ARM cycle counter is the only clock fine enough to see inside a body
+	// that is shorter than one tick of the system timer; performance.c has the
+	// code to enable it and nothing in the tree ever called it.
+	//   0 = reading the IEC lines   1 = two CPU cycles plus VIA/RTC update
+	//   2 = driving the IEC lines   3 = LEDs, buttons, idle-flush check
+	static u64 sectionCycles[4];
+
+	static u32 scsiBusReads;
+	static u32 scsiBusMismatches;
+	static u8 scsiBusMismatchXor;
+	static u8 scsiBusMismatchDdr;
 
 	// Memory bus (called by the CPU on every cycle).
 	u8 Read(u16 address);
@@ -176,7 +262,13 @@ private:
 	Interrupt via10IRQ;
 
 	u8 forcedDeviceID;
+	unsigned preloadMB;
 	unsigned headPosition;
+
+	// How many 2MHz cycles between RTC top-ups - half a second, comfortably
+	// inside the 71.6 minute wrap of the microsecond counter it works from.
+	static const u32 RTC_TICK_CYCLES = 1000000;
+	u32 rtcTickCountdown;
 
 	// Buttons pressed by the user right now.
 	bool buttonWP;

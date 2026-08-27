@@ -47,7 +47,7 @@ RTC72421::RTC72421()
 
 void RTC72421::Reset()
 {
-	// Default power on time: Wednesday 2026-01-01 00:00:00
+	// Default power on time: Thursday 2026-01-01 00:00:00
 	// (HDOS or GEOS can set the correct time via the T-W commands.)
 	seconds = 0;
 	minutes = 0;

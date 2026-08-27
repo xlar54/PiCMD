@@ -214,8 +214,18 @@ quick from then on.
 // Only works once the image HAS a stored number - see "Device numbers" below.
 //CMDHDDeviceID = 0
 
-// Size in MB of the RAM cache in front of the DHD image (default 32)
-//CMDHDCacheMB = 32
+// Size in MB of the RAM cache in front of the DHD image (default 24).
+// Keeping a chunk in RAM keeps writes off the card, and an SD access freezes
+// the emulated drive for as long as it takes, so the cache is what stops the
+// computer deciding the drive has gone away. If the allocation fails the size
+// is halved until it fits; the ceiling on this hardware is about 32MB.
+//CMDHDCacheMB = 24
+
+// Size in MB pinned into the cache at mount, starting at sector 0 (default 18).
+// The partition header, BAM and directory live in the first few MB and are
+// touched constantly, so pinning them means they are never evicted. Set to 0
+// to disable, at the cost of a stall the first time each of them is read.
+//CMDHDPreloadMB = 18
 
 // GPIO used to pull the IEC ATN line low (0 = off, 24 on a Pi1541io).
 // Needed only so the SWAP buttons can reprogram another drive - see
@@ -380,9 +390,16 @@ ROM is not there and is gitignored - it is not ours to redistribute - and
 - Supported Pi models: 3B/3B+ recommended (RASPPI=3 build). The 2MHz 65C02
   plus two VIAs is more work per microsecond than a 1MHz 1541; Pi Zero
   builds compile but are not expected to keep up.
-- DHD images are streamed from the SD card through a write-through cache
+- DHD images are streamed from the SD card through a **write-back** cache
   (`CMDHDCacheMB`). A cache miss stalls the emulated CPU for the duration
   of the SD access, exactly as if the SCSI drive were slow to respond.
+- **Eject before you cut the power.** Because the cache is write-back, a
+  write the computer believes it has completed may still be in RAM. It
+  reaches the card when the bus has been quiet for half a second, when a
+  dirty chunk has to be evicted, or when the image is ejected - and during
+  a long operation like a GEOS installation the quiet moment may not come
+  at all. Ejecting from the menu, or exiting emulation, flushes everything.
+  Pulling the plug mid-session can lose the last writes.
 - Fast serial (C128 burst) is wired through U10's shift register at the bit
   level and SRQ is sampled/driven as the 1581 build did. C64 use (including
   JiffyDOS, which HDOS implements in software) is unaffected.

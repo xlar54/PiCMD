@@ -25,6 +25,15 @@
 
 #define INVALID_VALUE	((unsigned) -1)
 
+// strncpy leaves the destination unterminated when the source fills it. The
+// string options all copy into 256 byte members, and only survived that by
+// accident: Options is a global, so .bss had already zeroed the last byte.
+static void CopyStringOption(char* dest, size_t size, const char* value)
+{
+	strncpy(dest, value, size - 1);
+	dest[size - 1] = 0;
+}
+
 char* TextParser::GetToken(bool includeSpace)
 {
 	bool isSpace;
@@ -122,7 +131,8 @@ bool TextParser::ParseComment()
 Options::Options(void)
 	: TextParser()
 	, CMDHDDeviceID(0)
-	, CMDHDCacheMB(32)
+	, CMDHDCacheMB(24)
+	, CMDHDPreloadMB(18)
 	, CMDHDAtnOutGPIO(0)
 	, CMDHDLcdLamps(1)
 	, onResetChangeToStartingFolder(0)
@@ -189,13 +199,19 @@ void Options::Process(char* buffer)
 		/*char* equals = */GetToken();
 		char* pValue = GetToken();
 
+		// A name with no value at the end of the file. Every branch below reads
+		// it, and strcasecmp/strncpy on a null pointer would take the Pi down
+		// before it ever showed the boot screen.
+		if (pValue == 0)
+			break;
+
 		if ((strcasecmp(pOption, "Font") == 0) || (strcasecmp(pOption, "ChargenFont") == 0))
 		{
-			strncpy(ROMFontName, pValue, 255);
+			CopyStringOption(ROMFontName, sizeof(ROMFontName), pValue);
 		}
 		else if ((strcasecmp(pOption, "AutoMountImage") == 0))
 		{
-			strncpy(autoMountImageName, pValue, 255);
+			CopyStringOption(autoMountImageName, sizeof(autoMountImageName), pValue);
 		}
 		ELSE_CHECK_DECIMAL_OPTION(onResetChangeToStartingFolder)
 		ELSE_CHECK_DECIMAL_OPTION(supportUARTInput)
@@ -232,11 +248,11 @@ void Options::Process(char* buffer)
 		ELSE_CHECK_DECIMAL_OPTION(CMDHDButtonExit)
 		else if ((strcasecmp(pOption, "LCDLogoName") == 0))
 		{
-			strncpy(LcdLogoName, pValue, 255);
+			CopyStringOption(LcdLogoName, sizeof(LcdLogoName), pValue);
 		}
 		else if ((strcasecmp(pOption, "LCDName") == 0))
 		{
-			strncpy(LCDName, pValue, 255);
+			CopyStringOption(LCDName, sizeof(LCDName), pValue);
 			if (strcasecmp(pValue, "ssd1306_128x64") == 0)
 				i2cLcdModel = LCD_1306_128x64;
 			else if (strcasecmp(pValue, "ssd1306_128x32") == 0)
@@ -246,10 +262,11 @@ void Options::Process(char* buffer)
 		}
 		else if ((strcasecmp(pOption, "CMDHDRomName") == 0) || (strcasecmp(pOption, "ROMCMDHD") == 0))
 		{
-			strncpy(ROMNameCMDHD, pValue, 255);
+			CopyStringOption(ROMNameCMDHD, sizeof(ROMNameCMDHD), pValue);
 		}
 		ELSE_CHECK_DECIMAL_OPTION(CMDHDDeviceID)
 		ELSE_CHECK_DECIMAL_OPTION(CMDHDCacheMB)
+		ELSE_CHECK_DECIMAL_OPTION(CMDHDPreloadMB)
 		ELSE_CHECK_DECIMAL_OPTION(CMDHDAtnOutGPIO)
 		ELSE_CHECK_DECIMAL_OPTION(CMDHDLcdLamps)
 	}
@@ -265,16 +282,44 @@ void Options::Process(char* buffer)
 unsigned Options::GetDecimal(char* pString)
 {
 	if (pString == 0 || *pString == '\0')
-		return 0;
+		return INVALID_VALUE;
 
-	return strtol(pString, NULL, 0);
+	// Report anything that is not a whole non-negative number as invalid so the
+	// option keeps its default. This used to hand back strtol's zero for input
+	// it could not parse at all, which turned a typo into a silent setting of
+	// zero - and made the INVALID_VALUE check at every call site dead code.
+	char* end = 0;
+	long value = strtol(pString, &end, 0);
+
+	if (end == pString || value < 0)
+		return INVALID_VALUE;
+
+	while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')
+		end++;
+	if (*end != '\0')
+		return INVALID_VALUE;
+
+	return (unsigned)value;
 }
 
 float Options::GetFloat(char* pString)
 {
+	// Same contract as GetDecimal: unparseable input has to be distinguishable
+	// from a real zero, or a typo silently becomes a setting of zero.
 	if (pString == 0 || *pString == '\0')
-		return 0;
+		return (float)INVALID_VALUE;
 
-	return atof(pString);
+	char* end = 0;
+	float value = strtof(pString, &end);
+
+	if (end == pString)
+		return (float)INVALID_VALUE;
+
+	while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')
+		end++;
+	if (*end != '\0')
+		return (float)INVALID_VALUE;
+
+	return value;
 }
 

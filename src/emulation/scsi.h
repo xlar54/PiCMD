@@ -2,7 +2,7 @@
 //
 // SCSI disk (target) emulation.
 // Ported from VICE's scsi.c/scsi.h written by Roberto Muscedere, adapted to
-// FatFS backed image files with a write-through sector cache.
+// FatFS backed image files with a write-back sector cache.
 //
 // This file is part of Pi1541.
 //
@@ -27,6 +27,25 @@
 
 struct scsi_context_s;
 
+// Write-path forensics: the payload ring and the bit-rot scan, both of which
+// live inside WriteSector and therefore run on the emulation thread, once per
+// 512 byte sector the computer writes.
+//
+// Off by default because they are not free, contrary to what the comment above
+// BitRotWrites used to claim. A 512 byte memcpy plus a 512 iteration compare
+// land on ONE iteration of a loop whose budget is 1.2us. PICMD-LST18.LOG, from
+// a GEOS installation, counts 745 + 1656 + 113 = 2514 overruns of three, four
+// and five microseconds, against 2515 sector writes in PICMD-WR00.LOG: one
+// apiece, no exceptions. The drive's deadline for the first symbol of a
+// transmitted byte is ten CPU cycles, 5us, and that symbol carries bits 0 and
+// 1 - the bits this scan exists to watch being set. So the instrumentation is
+// large enough to cause the fault it was written to catch, which is the same
+// trap D4 of the timing handoff already recorded once.
+//
+// Set to 1 for a run that needs the payload log or the live rot counter, and
+// read the resulting numbers knowing they were bought at that price.
+#define PICMD_WRITE_FORENSICS 0
+
 // A SCSI hard disk image backed by a FatFS file.
 //
 // Accesses go through a write-back cache of CACHE_CHUNK_SIZE chunks so that
@@ -44,7 +63,14 @@ public:
 	static const u32 CACHE_CHUNK_SIZE = 1 << CACHE_CHUNK_SHIFT;
 	static const u32 SECTORS_PER_CHUNK = CACHE_CHUNK_SIZE / SECTOR_SIZE;
 
-	ScsiImage() : attached(false), sizeInSectors(0), readOnly(false) {}
+	// Everything, not just the three that used to be here: the images live in a
+	// global today so .bss covers the rest, but an ScsiImage anywhere else
+	// would start with a garbage imageId and match other images' cache slots.
+	ScsiImage()
+		: attached(false), sizeInSectors(0), readOnly(false), needSync(false), imageId(0)
+	{
+		name[0] = 0;
+	}
 
 	bool Attach(const char* filename, bool readOnly);
 	void Detach();
@@ -71,18 +97,134 @@ public:
 	// left alone.
 	static u32 AccessCounter() { return accessCounter; }
 
+	// How many times a slot had to be taken from a chunk that still had
+	// unwritten sectors in it. Every one of those is a synchronous write to
+	// the card from inside ReadSector/WriteSector - the exact stall the cache
+	// is supposed to prevent. If this stays at zero the cache is coping; if it
+	// climbs during a transfer, that is where the drive is going deaf.
+	static u32 DirtyEvictions() { return dirtyEvictions; }
+	static void ResetDirtyEvictions() { dirtyEvictions = 0; }
+
+	// Read instrumentation, for telling a cache coherency fault from a plain
+	// slow card. Only ReadSector is counted; the whole disk scan deliberately
+	// goes round the cache and would swamp the numbers.
+	//
+	// cacheReadHits   - answered from a slot without touching the card.
+	// cacheReadMisses - had to go to the file.
+	// dirtyChunkReads - landed on a chunk still holding unflushed writes.
+	// dirtyChunkPartialFills - the subset of those that also had to pull a
+	//   sector off the card into that same chunk. This is the only path in the
+	//   cache that mixes what the card holds with writes that have not reached
+	//   it, so if a stale block is ever handed back this is where it comes
+	//   from. Zero here rules the cache out the way dirtyEvictions did.
+	static u32 CacheReadHits() { return cacheReadHits; }
+	static u32 CacheReadMisses() { return cacheReadMisses; }
+	static u32 DirtyChunkReads() { return dirtyChunkReads; }
+	static u32 DirtyChunkPartialFills() { return dirtyChunkPartialFills; }
+
+	// Bytes that gain bits 0 and 1 and nothing else between one write of a
+	// sector and the next. That is the signature of the corruption eating the
+	// BAM and directory sectors: never 0x01 alone, never 0x02 alone, always
+	// both, and only ever in sectors the drive reads, modifies and writes back
+	// itself. Caught here rather than by comparing image files afterwards, so
+	// the first event names its own LBA while the machine is still running.
+	//
+	// Only checked when the sector's old contents are already sitting in the
+	// cache, which is exactly the read-modify-write case - so this costs no
+	// card access and cannot add a stall. Three bytes is the floor: real
+	// events run to eleven or more, while a single byte flipping to a low bit
+	// is ordinary data (a block count, a link) and would be noise.
+	// Sectors the card refused and that were dropped when the image detached.
+	// Anything other than zero here is user data that did not survive.
+	static u32 UnflushedSectors() { return unflushedSectors; }
+
+	static u32 BitRotWrites() { return bitRotWrites; }
+	static u32 BitRotBytes() { return bitRotBytes; }
+	static u32 BitRotFirstLba() { return bitRotFirstLba; }
+	static u8 BitRotMask() { return bitRotMask; }
+
+	// Zero every counter above, plus the stall watermark and the access log.
+	// Called on mount so the figures describe what the computer went on to do
+	// rather than the whole disk scan that precedes it - the scan alone is
+	// imagesize/128 reads, which would fill the log before the computer has
+	// asked for anything.
+	static void ResetCounters();
+
+	// Every sector access in order, so the pattern around a failure can be
+	// read back afterwards. The contents are known good by now; what is not
+	// known is where they were going. Held in RAM and written out on eject,
+	// because going to the card while the bus is live is what breaks the
+	// drive.
+#if PICMD_ACCESS_FORENSICS
+	static u32 AccessLogCount() { return accessLogCount; }
+#endif
+	static u32 MaxLbaWritten() { return maxLbaWritten; }
+#if PICMD_ACCESS_FORENSICS
+	static bool DumpAccessLog(const char* prefix);
+#endif
+
+	// The addresses turned out not to be enough: the data lands in the right
+	// sectors and the file still comes out half its length, so what matters
+	// now is the bytes. Keeps the whole 512 byte payload of the last writes.
+#if PICMD_ACCESS_FORENSICS
+	static bool DumpWriteLog(const char* prefix);
+#endif
+
+	// Chunks written per visit to FlushIdle. Not "one card write": FlushChunk
+	// writes each contiguous run of dirty sectors separately, so a 4K chunk
+	// with an alternating dirtyMask costs up to four f_write calls. One chunk
+	// is still the smallest unit the flush can be built out of, and it is what
+	// an eviction already costs - FindSlot flushes a single dirty victim
+	// synchronously - so this bounds the idle drain to a freeze the drive
+	// already survives elsewhere. The caller comes straight back on the next
+	// slow tick while the bus stays quiet, so a backlog drains promptly but in
+	// slices the drive can answer ATN between.
+	static const u32 IDLE_FLUSH_CHUNKS = 1;
+
+	// Why the flush stopped. The three used to be one bool, which meant the
+	// caller could not tell "there is more, come straight back" from "the card
+	// said no" - and retrying a failed write every 256us instead of every half
+	// second is a real-time regression for nothing, since FatFS latches the
+	// error and the retry never reaches the card anyway.
+	enum FlushResult
+	{
+		FLUSH_DONE,		// nothing left owed
+		FLUSH_MORE,		// hit the per-visit bound; come back next slow tick
+		FLUSH_STOPPED	// the bus wants us, or a write failed; back off
+	};
+
 	// Flush every attached image. Only call this when the serial bus is quiet:
 	// it goes to the card, which freezes the emulated CPU, and a frozen CPU
 	// cannot answer ATN.
-	static void FlushIdle();
+	//
+	// abort is checked before each chunk - and before the per-visit bound, so
+	// that a bound of one does not turn it into a callback that can never
+	// fire. Whatever is left stays dirty and goes out at the next quiet
+	// moment, or at detach.
+	static FlushResult FlushIdle(bool (*abort)() = 0);
+
+	// How many chunks are written but not yet on the card. This is what would
+	// be lost by pulling the power, so it is worth being able to see it.
+	static u32 DirtyChunkCount();
 
 	// Flush dirty chunks and FatFS metadata. Does nothing unless forced -
 	// going to the card at an arbitrary moment is what broke the bus. Detach
 	// forces it; everything else waits for FlushIdle.
-	void Sync(bool force = false);
+	bool Sync(bool force = false);
+
+	// Read the front of the image into the cache and pin it, so that region
+	// never costs an SD access again. Call it at mount and nowhere else: it
+	// goes to the card for as long as it takes, which is only safe while the
+	// bus is quiet. progressSectors/totalSectors drive the on screen bar and
+	// may be null. Returns the number of chunks actually loaded.
+	u32 PreloadCache(u32 maxBytes, volatile u32* progressSectors, volatile u32* totalSectors);
+	static u32 PinnedKB() { return (pinnedChunks * CACHE_CHUNK_SIZE) >> 10; }
 
 	// The (global) cache used by all images.
 	static void InitCache(u32 sizeInBytes);
+	// How much cache was actually obtained. Zero means every access goes
+	// straight to the card, so it is worth showing at boot.
+	static u32 CacheSizeKB() { return (numCacheSlots * CACHE_CHUNK_SIZE) >> 10; }
 
 private:
 	FIL file;
@@ -92,6 +234,52 @@ private:
 	bool needSync;
 	static u32 worstStallMicros;
 	static u32 accessCounter;
+	static u32 dirtyEvictions;
+	static u32 cacheReadHits;
+	static u32 cacheReadMisses;
+	static u32 dirtyChunkReads;
+	static u32 dirtyChunkPartialFills;
+	static u32 unflushedSectors;
+	static u32 bitRotWrites;
+	static u32 bitRotBytes;
+	static u32 bitRotFirstLba;
+	static u8 bitRotMask;
+
+	// 16K entries at 8 bytes is 128KB of BSS, and covers a GEOS install with
+	// room to spare. If it ever wraps, accessLogCount says so and the dump
+	// prints the surviving tail in order.
+	static const u32 ACCESS_LOG_ENTRIES = 16384;
+	struct AccessLogEntry
+	{
+		u32 lba;
+		u8 op;			// 'R' cached read, 'W' write, 'U' uncached read
+		u8 image;
+		u8 result;		// 0 = accepted, 1 = refused (out of range, detached)
+		u8 pad;
+	};
+#if PICMD_ACCESS_FORENSICS
+	static AccessLogEntry accessLog[ACCESS_LOG_ENTRIES];
+	static u32 accessLogCount;		// total accesses, not entries held
+#endif
+	static u32 maxLbaWritten;
+#if PICMD_ACCESS_FORENSICS
+	void LogAccess(u32 lba, u8 op, u8 result);
+#else
+	// Compiled to nothing rather than removed from the call sites: the calls
+	// mark the three places an access enters the image, which is worth keeping
+	// visible even when nobody is recording them.
+	inline void LogAccess(u32, u8, u8) {}
+#endif
+
+	// 256 payloads of 512 bytes is 128KB, and covers every write a whole file
+	// copy makes with room over.
+	static const u32 WRITE_LOG_ENTRIES = 256;
+#if PICMD_ACCESS_FORENSICS
+	static u8 writeLogData[WRITE_LOG_ENTRIES][SECTOR_SIZE];
+	static u32 writeLogLba[WRITE_LOG_ENTRIES];
+	static u32 writeLogSeq[WRITE_LOG_ENTRIES];	// index into the access log
+	static u32 writeLogCount;
+#endif
 
 	char name[256];
 
@@ -113,7 +301,9 @@ private:
 	// Push one dirty chunk out to the card. Used when a slot is reused for
 	// something else, and by Sync.
 	int FlushChunk(CacheSlot& slot);
-	void FlushAllDirty();
+	u32 DirtySectorCount();
+	// maxChunks == 0 means unbounded.
+	FlushResult FlushAllDirty(bool (*abort)() = 0, u32 maxChunks = 0);
 	static void NoteStall(u32 startMicros);
 
 	// A chunk being evicted can belong to a different disk, so we need to get
@@ -125,7 +315,11 @@ private:
 	static u8* cachePool;
 	static CacheSlot* cacheSlots;
 	static u32 numCacheSlots;
-	static u8 nextImageId;
+
+	// Slots [0, pinnedChunks) belong to image pinnedImage, chunk N in slot N.
+	// The hash covers only what is left, so nothing can collide with them.
+	static u32 pinnedChunks;
+	static u8 pinnedImage;
 
 	u8 imageId;
 

@@ -391,7 +391,15 @@ public:
 	}
 #endif
 
-	static void UpdateButton(int index, unsigned gplev0)
+	// step is how many sampling periods this call stands for. The thresholds
+	// above are counts of samples, and were written when every caller sampled
+	// once per microsecond; a caller that samples less often passes the
+	// divisor here so that 20000 keeps meaning 20 milliseconds instead of
+	// silently becoming five seconds - which is exactly what happened to every
+	// button on the front panel the first time this loop was decimated. The
+	// equality tests become crossed-this-call tests for the same reason: a
+	// step larger than one can jump straight over a threshold.
+	static void UpdateButton(int index, unsigned gplev0, unsigned step = 1)
 	{
 		bool inputcurrent = (gplev0 & ButtonPinFlags[index]) == 0;
 
@@ -400,15 +408,18 @@ public:
 
 		if (inputcurrent)
 		{
-			validInputCount[index]++;
-			if (validInputCount[index] == INPUT_BUTTON_DEBOUNCE_THRESHOLD)
+			unsigned before = validInputCount[index];
+			validInputCount[index] = before + step;
+			if (before < INPUT_BUTTON_DEBOUNCE_THRESHOLD &&
+				validInputCount[index] >= INPUT_BUTTON_DEBOUNCE_THRESHOLD)
 			{
 				InputButton[index] = true;
 				inputRepeatThreshold[index] = INPUT_BUTTON_DEBOUNCE_THRESHOLD + INPUT_BUTTON_REPEAT_THRESHOLD;
 				inputRepeat[index]++;
 			}
 
-			if (validInputCount[index] == inputRepeatThreshold[index])
+			if (before < inputRepeatThreshold[index] &&
+				validInputCount[index] >= inputRepeatThreshold[index])
 			{
 				inputRepeat[index]++;
 				inputRepeatThreshold[index] += INPUT_BUTTON_REPEAT_THRESHOLD / inputRepeat[index];
@@ -428,8 +439,9 @@ public:
 
 
 	static void ReadBrowseMode(void);
-	static void ReadGPIOUserInput(void);
+	static void ReadGPIOUserInput(unsigned step = 1);
 	static void ReadEmulationModeCMDHD(void);
+	static void ReadBusInputsCMDHD(void);
 
 	static void WaitUntilReset(void)
 	{
@@ -676,6 +688,11 @@ private:
 
 	static bool DataSetToOut;
 	static bool AtnaDataSetToOut;
+	// Snapshot of the three above, taken at the end of each full sample, for the
+	// trimmed mid-loop sample to use instead of the live flags.
+	static bool sampledDataSetToOut;
+	static bool sampledAtnaDataSetToOut;
+	static bool sampledClockSetToOut;
 	static bool ClockSetToOut;
 	static bool SRQSetToOut;
 	static bool AtnSetToOut;

@@ -46,8 +46,19 @@ CMDHDAtnOutGPIO = 24
 // brings it up on device 30 from the boot ROM.
 //CMDHDDeviceID = 0
 
-// Size in MB of the RAM cache in front of the DHD image.
-//CMDHDCacheMB = 32
+// Size in MB of the RAM cache in front of the DHD image. Keeping a chunk in
+// RAM keeps writes off the card, and an SD access freezes the emulated drive
+// for as long as it takes. Halved automatically if it will not fit; the
+// ceiling on this hardware is about 32MB.
+//
+// The cache is WRITE-BACK: eject before cutting the power, or the last writes
+// may still be in RAM. See the note in README.md.
+//CMDHDCacheMB = 24
+
+// Size in MB pinned into the cache at mount, from sector 0 (default 18). The
+// partition header, BAM and directory live there and are touched constantly.
+// Set to 0 to disable.
+//CMDHDPreloadMB = 18
 
 // Front panel buttons. The real CMD HD has four: SWAP 8, SWAP 9,
 // WRITE PROTECT and RESET. Button 5 exits emulation (not a CMD HD function).

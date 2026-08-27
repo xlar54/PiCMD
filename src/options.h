@@ -52,6 +52,10 @@ public:
 	inline const char* GetRomNameCMDHD() const { return ROMNameCMDHD; }
 	inline unsigned int GetCMDHDDeviceID() const { return CMDHDDeviceID; }
 	inline unsigned int GetCMDHDCacheMB() const { return CMDHDCacheMB; }
+	// Megabytes of the image read into the cache at mount, before the computer
+	// can ask for anything. Those chunks are pinned: they cannot be evicted, so
+	// they never cost an SD access again. 0 disables it.
+	inline unsigned int GetCMDHDPreloadMB() const { return CMDHDPreloadMB; }
 	// GPIO used to pull the IEC ATN line low (0 = the drive cannot drive ATN).
 	// 24 on a Pi1541io: its ATN level shifter is bidirectional, so the pin that
 	// reads ATN can drive it too.
@@ -116,6 +120,7 @@ public:
 private:
 	unsigned int CMDHDDeviceID;
 	unsigned int CMDHDCacheMB;
+	unsigned int CMDHDPreloadMB;
 	unsigned int CMDHDAtnOutGPIO;
 	unsigned int CMDHDLcdLamps;
 	unsigned int onResetChangeToStartingFolder;

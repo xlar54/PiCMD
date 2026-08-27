@@ -43,6 +43,9 @@ bool IEC_Bus::VIA_Clock = false;
 
 bool IEC_Bus::DataSetToOut = false;
 bool IEC_Bus::AtnaDataSetToOut = false;
+bool IEC_Bus::sampledDataSetToOut = false;
+bool IEC_Bus::sampledAtnaDataSetToOut = false;
+bool IEC_Bus::sampledClockSetToOut = false;
 bool IEC_Bus::ClockSetToOut = false;
 bool IEC_Bus::SRQSetToOut = false;
 bool IEC_Bus::AtnSetToOut = false;
@@ -75,11 +78,11 @@ u32 IEC_Bus::emulationModeCheckButtonIndex = 0;
 
 unsigned IEC_Bus::gplev0;
 
-void IEC_Bus::ReadGPIOUserInput()
+void IEC_Bus::ReadGPIOUserInput(unsigned step)
 {
 	for (int index = 0; index < buttonCount; ++index)
 	{
-		UpdateButton(index, gplev0);
+		UpdateButton(index, gplev0, step);
 	}
 }
 
@@ -128,13 +131,76 @@ void IEC_Bus::ReadBrowseMode(void)
 // the addition of SRQ for fast serial. The one difference that matters is the
 // ATN acknowledge gate: the CMD HD ANDs ATNA with ATN (like the 1581) rather
 // than XORing them (like the 1541).
+// A second, cheap look at the bus, taken between the two emulated CPU cycles.
+//
+// Why a trimmed one rather than another ReadEmulationModeCMDHD: that costs 156
+// cycles and does not fit - it was tried in fe3cdc2 and took the loop to 69
+// overruns per thousand. Of those 156, the blocking read of GPLEV0 is 69,
+// measured (PICMD-LST27.LOG, "read cost: gplev 69"), so most of the rest is
+// decoding that the second look does not need.
+//
+// What it deliberately does NOT do:
+//   - it does not touch PI_Data or PI_Clock. PI_Data feeds via10's CB2 in
+//     PiCMDHD::Update, and cb2 is the data bit of the fast serial shift
+//     register; moving it half a microsecond relative to the CB1 shift clock
+//     could change which side of an SRQ edge a bit lands on. That would
+//     manufacture corruption in the exact mechanism under investigation.
+//     The routines that need serving read ORB, which is portB's input latch.
+//   - it does not touch ATN, which is edge triggered into CA1 and whose
+//     acknowledge already runs on the full sample.
+//   - it does not write IEC_Bus::gplev0, which the front panel sampler reads
+//     once every 256 loops and which must keep meaning "the level at the top
+//     of the loop".
+//
+// The guards match the full sampler exactly: a line the drive is pulling low
+// itself cannot be sensed, because the pin is an output.
+void IEC_Bus::ReadBusInputsCMDHD(void)
+{
+	unsigned lev = read32(ARM_GPIO_GPLEV0);
+
+	IOPort* portB = port;
+	if (!portB)
+		return;
+
+	// The guards are a SNAPSHOT taken at the top of the loop, not the live
+	// flags, and that is the whole point.
+	//
+	// If the emulated CPU releases DATA or CLOCK during the first emulated
+	// cycle, PortB_OnPortOut puts that on the wire immediately. A live guard
+	// would be open by the time this runs a few hundred nanoseconds later, so
+	// we would sample a line that has not finished rising - open collector,
+	// pull-up, cable capacitance - and hand the drive back its own pull as if
+	// the computer were still asserting it. On the hardware that looks exactly
+	// like the fault this change exists to fix: a first symbol late or with a
+	// bit stuck low, and WORSE with the fix than without it.
+	//
+	// With the snapshot, a line released mid-loop is not sensed until the next
+	// top-of-loop sample, which is the timing the baseline has always had.
+#ifndef REAL_XOR
+	if (!sampledAtnaDataSetToOut && !sampledDataSetToOut)
+#else
+	if (!sampledDataSetToOut)
+#endif
+		portB->SetInput(VIAPORTPINS_DATAIN,
+			(lev & PIGPIO_MASK_IN_DATA) == (invertIECInputs ? PIGPIO_MASK_IN_DATA : 0));
+
+	if (!sampledClockSetToOut)
+		portB->SetInput(VIAPORTPINS_CLOCKIN,
+			(lev & PIGPIO_MASK_IN_CLOCK) == (invertIECInputs ? PIGPIO_MASK_IN_CLOCK : 0));
+}
+
 void IEC_Bus::ReadEmulationModeCMDHD(void)
 {
-	bool AtnaDataSetToOutOld = AtnaDataSetToOut;
-	IOPort* portB = 0;
 	gplev0 = read32(ARM_GPIO_GPLEV0);
 
-	portB = port;
+	IOPort* portB = port;
+
+	// Nearly every line below dereferences these, and the one null check that
+	// was here covered a single case out of five. Both are set together before
+	// emulation starts, so this only matters to a future caller that gets the
+	// order wrong - but then it matters as a hang, not a wrong bus level.
+	if (!portB || !VIA)
+		return;
 
 #ifndef REAL_XOR
 	// ATN is an input unless the drive itself is driving it (pb6), in which
@@ -167,7 +233,7 @@ void IEC_Bus::ReadEmulationModeCMDHD(void)
 		}
 	}
 
-	if (portB && (portB->GetDirection() & 0x10) == 0)
+	if ((portB->GetDirection() & 0x10) == 0)
 		AtnaDataSetToOut = false; // If the ATNA PB4 gets set to an input then we can't be pulling data low. (Maniac Mansion does this)
 
 	// moved from PortB_OnPortOut
@@ -245,6 +311,12 @@ void IEC_Bus::ReadEmulationModeCMDHD(void)
 	}
 
 	Resetting = !ignoreReset && ((gplev0 & PIGPIO_MASK_IN_RESET) == (invertIECInputs ? PIGPIO_MASK_IN_RESET : 0));
+
+	// What ReadBusInputsCMDHD will use half a microsecond from now. See the
+	// note there for why it must not read the live flags.
+	sampledDataSetToOut = DataSetToOut;
+	sampledAtnaDataSetToOut = AtnaDataSetToOut;
+	sampledClockSetToOut = ClockSetToOut;
 }
 
 void IEC_Bus::PortB_OnPortOut(void* pUserData, unsigned char status)
@@ -290,6 +362,27 @@ void IEC_Bus::PortB_OnPortOut(void* pUserData, unsigned char status)
 
 	ClockSetToOut = VIA_Clock;
 	DataSetToOut = VIA_Data;
+
+	// Put the change on the wire now rather than waiting for the main loop's
+	// once-per-microsecond refresh.
+	//
+	// The drive answers a strobe by writing this port and then counting NOPs:
+	// its first transmitted symbol is due about 14 cycles - 7us - after the
+	// poll that spotted the strobe, and the following three have 7.5 to 10us
+	// of slack. Deferring the write to the end of the microsecond spends up to
+	// 1us of that first budget for nothing, and the first symbol is where 404
+	// of 422 observed bit flips land.
+	//
+	// It is close to free: these flags only move when the CPU writes the port,
+	// which is four times per transmitted byte against roughly 35us of
+	// transfer, so the common case does not reach here at all. Writes to
+	// device memory are posted, so the store itself does not stall either.
+	if (DataSetToOut != oldDataSetToOut ||
+		ClockSetToOut != oldClockSetToOut ||
+		AtnaDataSetToOut != AtnaDataSetToOutOld)
+	{
+		RefreshOutsCMDHD();
+	}
 
 	//if (!oldDataSetToOut && DataSetToOut)
 	//{

@@ -143,6 +143,21 @@ class m6522
 	};
 
 public:
+	// Fast serial diagnostics. The CMD HD carries GEOS traffic through this
+	// shift register, and bytes have been arriving with their low bits set -
+	// which is what an extra clock edge sampling the idle line looks like.
+	// srEdgesWhileFull counts edges with no room left, srShortReads counts the
+	// CPU taking the byte before eight bits are in.
+	static u32 srBytesIn;
+	static u32 srEdgesWhileFull;
+	static u32 srShortReads;
+	// Which shift modes have ever been active (bit N = mode N), and how many
+	// bits have actually moved each way. Mode 3 alone stayed at zero, so the
+	// question is which one the CMD HD really drives.
+	static u32 srModeMask;
+	static u32 srShiftsIn;
+	static u32 srShiftsOut;
+
 /*
 FCR/PCR
 						+---+---+---+---+---+---+---+---+
@@ -214,8 +229,66 @@ FCR/PCR
 	unsigned char GetLatchedValueB() { return latchedValueB; }
 	inline bool GetCB1() { return cb1; }
 	void InputCB1(bool value);
+	// Called once per emulated CPU cycle from PiCMDHD::Update whether or not
+	// the line has moved, which on a C64 is almost always. Both bodies do
+	// nothing at all when the new level equals the old one, so the test can be
+	// hoisted here and the call saved - four calls per emulated microsecond
+	// that no longer leave the header.
+	//
+	// The comparison has to be against the VIA's own cb1/cb2 and nothing else.
+	// cb2 in particular is also cleared by the CPU writing ORB in handshake
+	// mode and by pulse mode in Execute, so a level cached outside this object
+	// would miss an edge - and a missed fast serial edge is a corrupted bit in
+	// exactly the mechanism under investigation.
+#if PICMD_VIA_IDLE_SKIP
+	// True when Execute() would provably do nothing but its two trailing
+	// assignments. Recomputed only in Write() and Reset(), which are the only
+	// places that can turn any of these on - while it is true, every setter of
+	// every term below sits inside the code the early-out skips, so the cache
+	// cannot go stale. Cheap on purpose: the version that tested all of this
+	// per call cost more than it saved.
+	void UpdateIdleCache()
+	{
+		idleCache = (auxiliaryControlRegister == 0)
+			&& !t1Ticking && !t2CountingDown
+			&& !t1TimedOut && !t2TimedOut && !t1Reload
+			&& !cb1OutputShiftClockPositiveEdge;
+	}
+#endif
+
+	// Always available, not diagnostic: the deployed build reports these at
+	// eject so a session that woke U9 up says so.
+	unsigned char AcrValue() const { return auxiliaryControlRegister; }
+	bool T1Ticking() const { return t1Ticking; }
+	bool T2Counting() const { return t2CountingDown; }
+
+#if PICMD_SPLIT_CPUVIAS
+	// How often the idle early-out in Execute actually fires. A saving that is
+	// only taken some of the time is worth only that fraction, and this
+	// project has been wrong about frequencies before.
+	u32 idleSkips, busyRuns;
+	u32 IdleSkips() const { return idleSkips; }
+	u32 BusyRuns() const { return busyRuns; }
+#endif
+	inline void InputCB1Level(bool value) { if (value != cb1) InputCB1(value); }
+	inline void InputCB2Level(bool value) { if (value != cb2) InputCB2(value); }
 	inline bool GetCB2() { return cb2; }
 	void InputCB2(bool value);
+
+#if PICMD_SPLIT_CPUVIAS
+	// M1: has this VIA ever left idle? t1Ticking and t2CountingDown are only
+	// cleared in Reset, so a single write to T1CH or T2CH decides for the whole
+	// session whether an early-out in Execute() can ever fire. Sticky rather
+	// than sampled: the answer must not depend on when we looked. Set in
+	// Write(), which only runs when the 65C02 addresses the VIA, so this costs
+	// the emulation loop nothing at all.
+	u8 diagStartedT1, diagStartedT2, diagWroteACR, diagAcrLast, diagIerLast;
+	u8 DiagFlags() const { return (u8)((diagStartedT1 ? 1 : 0) | (diagStartedT2 ? 2 : 0) | (diagWroteACR ? 4 : 0)); }
+	u8 DiagAcr() const { return diagAcrLast; }
+	u8 DiagIer() const { return diagIerLast; }
+	bool DiagT1Ticking() const { return t1Ticking; }
+	bool DiagT2Counting() const { return t2CountingDown; }
+#endif
 
 	void Execute();
 
@@ -352,6 +425,9 @@ private:
 	unsigned char latchedValueB;
 	bool cb1;
 	bool cb1Old;
+#if PICMD_VIA_IDLE_SKIP
+	bool idleCache;
+#endif
 	bool cb2;
 	bool pulseCB2;
 
@@ -376,7 +452,8 @@ private:
 	bool t2LowTimedOut;
 	bool t2OneShotTriggeredIRQ;
 	unsigned t2TimedOutCount;
-	unsigned char pb6Old;
+	// pb6Old removed: the negative edge test it fed compared a value masked
+	// with 0x40 against 1, so it could never be true. See the note in Execute.
 
 	unsigned char interruptFlagRegister;
 	unsigned char interruptEnabledRegister;

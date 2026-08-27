@@ -236,6 +236,12 @@ void InitialiseHardware()
 	{
 		MaxClk = mp->data.buffer_32[1];
 	}
+	// Keep it. Every budget argument in this investigation has used "about 1200
+	// cycles per microsecond" without ever reading the clock, and on RPI3 this
+	// value was read here and thrown away. clockCycles1MHz cannot settle it -
+	// that is only computed inside the RPI2 branch below. Costs the loop
+	// nothing, and PICMD-LST23.LOG is the run where it would have mattered.
+	PiCMDHD::armClockHz = MaxClk;
 	RPI_PropertyInit();
 	RPI_PropertyAddTag(TAG_SET_CLOCK_RATE, ARM_CLK_ID, MaxClk);
 	RPI_PropertyProcess();
@@ -412,9 +418,9 @@ static void UpdateLCDLamps(void)
 	if (rows == 0)
 		return;
 
-	bool on[6];
-	const char* wide[6];
-	const char* narrow[6];
+	bool on[7];
+	const char* wide[7];
+	const char* narrow[7];
 
 	on[0] = true;								// POWER - the drive is running
 	on[1] = piCMDHD.IsActivityLEDOn();
@@ -422,13 +428,17 @@ static void UpdateLCDLamps(void)
 	on[3] = piCMDHD.IsWriteProtectLEDOn();
 	on[4] = piCMDHD.IsSwap8LEDOn();
 	on[5] = piCMDHD.IsSwap9LEDOn();
+	on[6] = piCMDHD.IsGeosLEDOn();
 
-	wide[0] = "POWER";   narrow[0] = "PWR";
-	wide[1] = "ACTIVE";  narrow[1] = "ACT";
-	wide[2] = "ERROR";   narrow[2] = "ERR";
-	wide[3] = "WR PROT"; narrow[3] = "WP";
-	wide[4] = "DRIVE 8"; narrow[4] = "D8";
-	wide[5] = "DRIVE 9"; narrow[5] = "D9";
+	wide[0] = "POWER"; narrow[0] = "PWR";
+	wide[1] = "ACTIV"; narrow[1] = "ACT";
+	wide[2] = "ERROR"; narrow[2] = "ERR";
+	wide[3] = "WPROT"; narrow[3] = "WP";
+	wide[4] = "DRV 8"; narrow[4] = "D8";
+	wide[5] = "DRV 9"; narrow[5] = "D9";
+	wide[6] = "GEOS";  narrow[6] = "GEO";
+
+	const int numLamps = 7;
 
 	core0RefreshingScreen.Acquire();
 	IEC_Bus::WaitMicroSeconds(100);
@@ -436,20 +446,23 @@ static void UpdateLCDLamps(void)
 	u32 lampRows;
 	if (rows >= 4)
 	{
-		// 16 characters across, so two lamps per row in eight column fields
+		// 16 characters across: three lamps per row in five column fields. Two
+		// per row read better, but seven lamps then need a fourth row, and on a
+		// four row display that is the status line underneath - which is worth
+		// more than the extra character each label would gain.
 		lampRows = 3;
-		for (int i = 0; i < 6; ++i)
+		for (int i = 0; i < numLamps; ++i)
 		{
-			snprintf(tempBuffer, tempBufferSize, "%-8s", wide[i]);
-			screenLCD->PrintText(false, (i & 1) ? 8 * 8 : 0, (i >> 1) * fontHeight,
+			snprintf(tempBuffer, tempBufferSize, "%-5s", wide[i]);
+			screenLCD->PrintText(false, (i % 3) * 5 * 8, (i / 3) * fontHeight,
 				tempBuffer, 0, on[i] ? RGBA(0xff, 0xff, 0xff, 0xff) : 0);
 		}
 	}
 	else
 	{
-		// Only room for a couple of rows: four short tags each
+		// Only room for a couple of rows: four short tags each, so seven fit
 		lampRows = 2;
-		for (int i = 0; i < 6; ++i)
+		for (int i = 0; i < numLamps; ++i)
 		{
 			snprintf(tempBuffer, tempBufferSize, "%-4s", narrow[i]);
 			screenLCD->PrintText(false, (i % 4) * 4 * 8, (i / 4) * fontHeight,
@@ -464,6 +477,14 @@ static void UpdateLCDLamps(void)
 	IEC_Bus::WaitMicroSeconds(100);
 	core0RefreshingScreen.Release();
 #endif
+}
+
+// Asked between chunks while the idle flush drains the write-back cache. The
+// bus waking up outranks finishing the backlog: whatever is left stays dirty
+// and goes out at the next quiet moment.
+static bool BusWantsTheDrive()
+{
+	return IEC_Bus::IsAtnAsserted();
 }
 
 // This runs on core0 and frees up core1 to just run the emulator.
@@ -734,6 +755,124 @@ void UpdateScreen()
 				screen.PrintText(false, 0, y - 48, tempBuffer, textColour, bgColour);
 			}
 
+			// Dirty evictions are the only way a write can reach the card
+			// while the bus is live. A stall with this at zero is a cache
+			// miss on a read; a stall with this climbing is the cache set
+			// running out of clean ways mid-transfer.
+			static u32 oldDirtyEvictions = 0xffffffff;
+			u32 dirtyEvictions = ScsiImage::DirtyEvictions();
+			if (dirtyEvictions != oldDirtyEvictions)
+			{
+				oldDirtyEvictions = dirtyEvictions;
+				snprintf(tempBuffer, tempBufferSize, "dirty evictions %u   ", dirtyEvictions);
+				screen.PrintText(false, 0, y - 64, tempBuffer, textColour, bgColour);
+			}
+
+			// How the cache is being used at all. Misses are what the card
+			// sees; hits cost nothing.
+			static u32 oldCacheReads = 0xffffffff;
+			u32 cacheHits = ScsiImage::CacheReadHits();
+			u32 cacheMisses = ScsiImage::CacheReadMisses();
+			if (cacheHits + cacheMisses != oldCacheReads)
+			{
+				oldCacheReads = cacheHits + cacheMisses;
+				snprintf(tempBuffer, tempBufferSize, "cache rd hit %u miss %u pin %uK   ",
+					cacheHits, cacheMisses, ScsiImage::PinnedKB());
+				screen.PrintText(false, 0, y - 80, tempBuffer, textColour, bgColour);
+			}
+
+			// Reads that landed on a chunk still holding unflushed writes, and
+			// the ones that also had to fetch a sector off the card into that
+			// same chunk. The second number is the one that matters: it is the
+			// only place the cache mixes what the card holds with writes that
+			// have not reached it.
+			static u32 oldDirtyChunkReads = 0xffffffff;
+			u32 dirtyChunkReads = ScsiImage::DirtyChunkReads();
+			u32 dirtyPartial = ScsiImage::DirtyChunkPartialFills();
+			if (dirtyChunkReads != oldDirtyChunkReads)
+			{
+				oldDirtyChunkReads = dirtyChunkReads;
+				snprintf(tempBuffer, tempBufferSize, "dirty-chunk rd %u partial %u   ",
+					dirtyChunkReads, dirtyPartial);
+				screen.PrintText(false, 0, y - 96, tempBuffer, textColour, bgColour);
+			}
+
+#if PICMD_ACCESS_FORENSICS
+			// Total accesses and the highest sector written. The log behind
+			// these goes to PICMD-LBA.LOG on eject; this is the summary that
+			// is readable without pulling the card.
+			static u32 oldAccessLog = 0xffffffff;
+			u32 accessLog = ScsiImage::AccessLogCount();
+			if (accessLog != oldAccessLog)
+			{
+				oldAccessLog = accessLog;
+				snprintf(tempBuffer, tempBufferSize, "accesses %u max wr lba %u   ",
+					accessLog, ScsiImage::MaxLbaWritten());
+				screen.PrintText(false, 0, y - 112, tempBuffer, textColour, bgColour);
+			}
+#else
+			// Without the forensics there is no access count to show, but the
+			// write watermark costs nothing and is the half of the line that
+			// says whether the computer got where it meant to.
+			static u32 oldMaxLba = 0xffffffff;
+			u32 maxLba = ScsiImage::MaxLbaWritten();
+			if (maxLba != oldMaxLba)
+			{
+				oldMaxLba = maxLba;
+				snprintf(tempBuffer, tempBufferSize, "max wr lba %u   ", maxLba);
+				screen.PrintText(false, 0, y - 112, tempBuffer, textColour, bgColour);
+			}
+#endif
+
+			// The SCSI data bus against what the CPU actually read off it.
+			// The corrupted bytes only ever appear in sectors the drive reads,
+			// modifies and writes back itself - never in bulk data from the
+			// computer - and always as | 0x03, so this is the join to watch:
+			// bad > 0 with xor 03 is the whole bug. ddr says which way it got
+			// in - equal to xor, a direction bit left as an output; zero, the
+			// port A latch handing back an old byte.
+			static u32 oldScsiBusReads = 0xffffffff;
+			if (PiCMDHD::scsiBusReads != oldScsiBusReads)
+			{
+				oldScsiBusReads = PiCMDHD::scsiBusReads;
+				snprintf(tempBuffer, tempBufferSize, "scsi rd %u bad %u xor %02x ddr %02x   ",
+					PiCMDHD::scsiBusReads, PiCMDHD::scsiBusMismatches,
+					PiCMDHD::scsiBusMismatchXor, PiCMDHD::scsiBusMismatchDdr);
+				screen.PrintText(false, 0, y - 160, tempBuffer, textColour, bgColour);
+
+				// Fast serial health, redrawn alongside the SCSI counter
+				// rather than when its own numbers move. These can sit at zero
+				// for an entire session, and a line that only redraws on
+				// change is indistinguishable from one that was never drawn -
+				// which is exactly how the first run read. Riding on a counter
+				// that never stops moving makes a row of zeros a result.
+				snprintf(tempBuffer, tempBufferSize, "lost %u worst %u us   ",
+					PiCMDHD::lostCycles, PiCMDHD::worstLostUs);
+				screen.PrintText(false, 0, y - 144, tempBuffer, textColour, bgColour);
+
+				// Same reasoning as the shift register line above: a counter
+				// that is meant to stay at zero cannot own its own redraw, or
+				// zero and never-drawn look identical after the screen is
+				// cleared on a disk change. This one is the whole point of the
+				// run, so it rides along too.
+				snprintf(tempBuffer, tempBufferSize, "bitrot wr %u bytes %u lba %u mask %02x   ",
+					ScsiImage::BitRotWrites(), ScsiImage::BitRotBytes(),
+					ScsiImage::BitRotFirstLba(), ScsiImage::BitRotMask());
+				screen.PrintText(false, 0, y - 176, tempBuffer, textColour, bgColour);
+			}
+
+			// Chunks written but not yet on the card - what pulling the power
+			// would throw away. It drains on its own once the bus goes quiet;
+			// ejecting forces it out.
+			static u32 oldDirtyChunks = 0xffffffff;
+			u32 dirtyChunks = ScsiImage::DirtyChunkCount();
+			if (dirtyChunks != oldDirtyChunks)
+			{
+				oldDirtyChunks = dirtyChunks;
+				snprintf(tempBuffer, tempBufferSize, "unwritten %u KB   ", dirtyChunks * 4);
+				screen.PrintText(false, 0, y - 128, tempBuffer, textColour, bgColour);
+			}
+
 			static u32 oldScanPercent = 0xffffffff;
 			if (piCMDHD.IsScanning())
 			{
@@ -907,18 +1046,133 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 	ctBefore = read32(ARM_SYSTIMER_CLO);
 #endif
 
+	// See the note beside the slow-tick gate in the loop below.
+	static const u32 SLOW_TICK_EVERY = 256;
+	u32 slowTick = 0;
+
+	// Turn on the ARM cycle counter: E|P|C set, D clear so it counts every
+	// cycle rather than every 64th, then enable PMCCNTR itself (bit 31).
+	asm volatile ("mcr p15,0,%0,c9,c12,0" :: "r" (0x07) : "memory");
+	asm volatile ("mcr p15,0,%0,c9,c12,1" :: "r" (1u << 31) : "memory");
+	#define PMCC(v) asm volatile ("mrc p15,0,%0,c9,c13,0" : "=r" (v))
+
+#if PICMD_SPLIT_CPUVIAS
+	// M2. Run once at mount, before the loop, so it costs the emulation
+	// nothing. Reads only - GPLEV0 and the system timer are both harmless to
+	// read - so this cannot disturb the drive.
+	{
+		static volatile u32 sink;
+		const u32 N = 1000;
+		u32 a, b, acc;
+
+		PMCC(a);
+		acc = 0;
+		for (u32 i = 0; i < N; i++)
+			acc += read32(ARM_GPIO_GPLEV0);
+		PMCC(b);
+		sink = acc;
+		PiCMDHD::diagReadCost[0] = (b - a) / N;
+
+		// The same filler with no read, to be subtracted.
+		PMCC(a);
+		acc = 0;
+		for (u32 i = 0; i < N; i++)
+		{
+			u32 y = i;
+			// The barrier is the point. Without it -Ofast solved this loop in
+			// closed form and the filler measured zero cycles, which quietly
+			// invalidated the two figures that depend on it.
+			for (u32 k = 0; k < 8; k++) { y = y * 3 + 1; asm volatile ("" : "+r" (y)); }
+			acc += y;
+		}
+		PMCC(b);
+		sink = acc;
+		PiCMDHD::diagReadCost[1] = (b - a) / N;
+
+		// Read issued first, filler in between, result consumed after. If the
+		// load is kept in flight this comes out near the larger of the two
+		// above rather than near their sum.
+		PMCC(a);
+		acc = 0;
+		for (u32 i = 0; i < N; i++)
+		{
+			u32 x = read32(ARM_GPIO_GPLEV0);
+			u32 y = i;
+			for (u32 k = 0; k < 8; k++) { y = y * 3 + 1; asm volatile ("" : "+r" (y)); }
+			acc += x + y;
+		}
+		PMCC(b);
+		sink = acc;
+		PiCMDHD::diagReadCost[2] = (b - a) / N;
+
+		PMCC(a);
+		acc = 0;
+		for (u32 i = 0; i < N; i++)
+			acc += read32(ARM_SYSTIMER_CLO);
+		PMCC(b);
+		sink = acc;
+		PiCMDHD::diagReadCost[3] = (b - a) / N;
+	}
+#endif
+
 	while (exitReason == EXIT_UNKNOWN)
 	{
+#if PICMD_SECTION_PROBES
+		u32 pmc0, pmc1, pmc2, pmc3, pmc4;
+		PMCC(pmc0);
+#endif
 		IEC_Bus::ReadEmulationModeCMDHD();
+#if PICMD_SECTION_PROBES
+		PMCC(pmc1);
+#endif
 
 		// The CMD HD's 65C02 runs at 2MHz; two CPU cycles per 1MHz loop.
 		for (int cycle2MHz = 0; cycle2MHz < 2; ++cycle2MHz)
 		{
+			// Look at the bus again before the second emulated cycle.
+			//
+			// The drive waits for the computer's strobe in a seven cycle poll
+			// ($0372 BIT $8000 / $0375 BEQ $0372, so every 3.5us) and then has
+			// ten cycles - 5us - to get the first symbol of a byte onto the
+			// wires. That symbol carries bits 0 and 1, and between symbols the
+			// lines are parked at a state that decodes as both of them set, so
+			// a late symbol hands the computer the byte with 0x03 ORed in:
+			// 0x00 -> 0x03 in the BAM, 0x28 -> 0x2b in the free counts,
+			// GEOS -> GGOS, a space becoming a '#'.
+			//
+			// Sampling once per emulated microsecond makes the drive see the
+			// strobe late on every byte, whether or not the loop overran - and
+			// with overruns down to 69 in 494 million, a systematic delay is
+			// all that is left to explain what still corrupts.
+			//
+			// Stated honestly, this is not "1us of latency becomes 0.5us". The
+			// poll is seven cycles, an odd number, so the cycle on which the
+			// BIT reads the port alternates parity and only half the polls can
+			// benefit. What falls is how often a poll misses the strobe
+			// outright, and a missed poll costs the whole 3.5us to the next
+			// look. Expect the corruption rate to fall by something like six
+			// times, not to zero, and measure a rate.
+			if (PICMD_SECOND_SAMPLE && cycle2MHz)
+				IEC_Bus::ReadBusInputsCMDHD();
+
+#if PICMD_SPLIT_CPUVIAS
+			u32 st0 = PiCMDArmCycles();
 			piCMDHD.m65c02.Step();
+			PiCMDHD::subCycles[0] += (u32)(PiCMDArmCycles() - st0);
+			PiCMDHD::subSamples++;
+#else
+			piCMDHD.m65c02.Step();
+#endif
 			piCMDHD.Update();
 		}
 
+#if PICMD_SECTION_PROBES
+		PMCC(pmc2);
+#endif
 		IEC_Bus::RefreshOutsCMDHD();	// Now output all outputs.
+#if PICMD_SECTION_PROBES
+		PMCC(pmc3);
+#endif
 
 		IEC_Bus::OutputLED = piCMDHD.IsActivityLEDOn();
 #if defined(RPI3)
@@ -935,6 +1189,23 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 		// drive cannot acknowledge ATN, so the computer decides it has gone
 		// away. Doing this on a timer instead landed it between SCSI commands,
 		// which is the worst possible moment.
+		// Everything from here to the end of the button handling costs 189 of
+		// the 1179 cycles this loop body was measured to use, against a
+		// microsecond budget of about 1200 on a 1.2GHz Pi 3 - 98% consumed, so
+		// there is no room for a cache miss, and 6-7% of iterations overrun.
+		// None of it needs a microsecond cadence: buttons are mechanical, the
+		// LED is for human eyes, and the idle-flush poll is a counter whose
+		// threshold can simply be scaled. Run the lot once every 256 loops,
+		// which is a quarter of a millisecond - imperceptible on a button and
+		// invisible on a lamp.
+		if ((++slowTick & (SLOW_TICK_EVERY - 1)) == 0)
+		{
+		// First, and deliberately: the RESET button handler further down does
+		// a continue out of this block, so anything placed after it would be
+		// skipped on exactly the iteration that arms the countdown it feeds.
+		// Two emulated CPU cycles per loop, SLOW_TICK_EVERY loops per visit.
+		piCMDHD.SlowTick(SLOW_TICK_EVERY * 2);
+
 		{
 			static u32 lastAccessCount = 0;
 			static u32 quietLoops = 0;
@@ -944,14 +1215,33 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 				lastAccessCount = accessCount;
 				quietLoops = 0;
 			}
-			else if (++quietLoops >= 500000)		// this loop runs at 1MHz
+			else if (++quietLoops >= 500000 / SLOW_TICK_EVERY)	// scaled: this block now runs at 1MHz/SLOW_TICK_EVERY
 			{
-				quietLoops = 0;
-				ScsiImage::FlushIdle();
+				// Drain the backlog a chunk at a time while the quiet lasts.
+				//
+				// Unbounded, this wrote everything owed inside a single loop
+				// iteration with the emulated CPU frozen throughout: 48
+				// milliseconds in one go after a GEOS installation, the worst
+				// overrun in PICMD-LST37.LOG.
+				//
+				// Now it writes one chunk per visit and says which of three
+				// things happened, because they want different answers. More
+				// to do: hold the counter at the threshold so the next slow
+				// tick, 256us away, carries straight on - a long backlog still
+				// clears promptly, but as a run of short freezes with the loop
+				// and the bus alive in between. Stopped, whether because the
+				// computer wants the drive again or because a write failed:
+				// go back to waiting the full half second. Retrying a failed
+				// write every 256us buys nothing, since FatFS latches the
+				// error and the retry never reaches the card.
+				if (ScsiImage::FlushIdle(BusWantsTheDrive) == ScsiImage::FLUSH_MORE)
+					quietLoops = 500000 / SLOW_TICK_EVERY;
+				else
+					quietLoops = 0;
 			}
 		}
 
-		IEC_Bus::ReadGPIOUserInput();
+		IEC_Bus::ReadGPIOUserInput(SLOW_TICK_EVERY);
 
 		// SWAP 8, SWAP 9 and WRITE PROTECT are momentary, just like the real
 		// front panel; HDOS samples them and decides what they mean.
@@ -1008,7 +1298,12 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 			if (exitDoAutoLoad)
 				exitReason = EXIT_AUTOLOAD;
 		}
+		}	// end slow tick
 
+		// Reset detection stays on every iteration: resetCount counts loops,
+		// so moving it inside the slow tick would silently multiply its
+		// threshold by 256, and IsReset() only reads a flag the IEC sample
+		// already set.
 		// A reset on the IEC bus resets the drive but, unlike a floppy drive
 		// in a caddy workflow, a hard drive stays attached; keep emulating.
 		bool reset = IEC_Bus::IsReset();
@@ -1036,6 +1331,17 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 			asm volatile ("mrc p15,0,%0,c9,c13,0" : "=r" (ctAfter));
 		} while ((ctAfter - ctBefore) < clockCycles1MHz);
 #else
+#if PICMD_SECTION_PROBES
+		PMCC(pmc4);
+		PiCMDHD::sectionCycles[0] += (u32)(pmc1 - pmc0);
+		PiCMDHD::sectionCycles[1] += (u32)(pmc2 - pmc1);
+		PiCMDHD::sectionCycles[2] += (u32)(pmc3 - pmc2);
+		PiCMDHD::sectionCycles[3] += (u32)(pmc4 - pmc3);
+#endif
+		// Not behind the switch: this is the denominator of the overrun rate,
+		// which is the drive's health meter and has to keep working in a build
+		// nobody is measuring.
+		PiCMDHD::loopIterations++;
 		do	// Sync to the 1MHz clock
 		{
 			ctAfter = read32(ARM_SYSTIMER_CLO);
@@ -1044,7 +1350,10 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 			{
 				// If this ever occurs then we have taken too long (ie >1us) and lost a cycle.
 				// Cycle accuracy is now in jeopardy. If this occurs during critical communication loops then emulation can fail!
-				//DEBUG_LOG("!");
+				PiCMDHD::lostCycles++;
+				PiCMDHD::lostHist[ct < 16 ? ct : 15]++;
+				if (ct > PiCMDHD::worstLostUs)
+					PiCMDHD::worstLostUs = ct;
 			}
 		} while (ctAfter == ctBefore);
 #endif
@@ -1124,12 +1433,14 @@ void emulator()
 
 			inputMappings->WaitForClearButtons();
 
-#if not defined(EXPERIMENTALZERO)
-			core0RefreshingScreen.Release();
-#endif
+			// No Release here. This core never acquired core0RefreshingScreen
+			// on the way into emulation, and SpinLock::Release just stores zero
+			// without checking ownership - so releasing it here handed the lock
+			// away while core 0 was still inside a refresh, putting both cores
+			// in the framebuffer and, worse, in the middle of the same I2C
+			// transaction to the LCD.
 		}
 	}
-	delete fileBrowser;
 }
 
 //static void MouseHandler(unsigned nButtons,
@@ -1253,6 +1564,8 @@ void DisplayOptions(int y_pos)
 	screen.PrintText(false, 0, y_pos += 16, tempBuffer, COLOUR_WHITE, COLOUR_BLACK);
 	snprintf(tempBuffer, tempBufferSize, "LcdLogoName = %s\r\n", options.GetLcdLogoName());
 	screen.PrintText(false, 0, y_pos += 16, tempBuffer, COLOUR_WHITE, COLOUR_BLACK);
+	snprintf(tempBuffer, tempBufferSize, "CMDHDCacheMB = %d\r\n", options.GetCMDHDCacheMB());
+	screen.PrintText(false, 0, y_pos += 16, tempBuffer, COLOUR_WHITE, COLOUR_BLACK);
 #endif
 }
 
@@ -1356,8 +1669,36 @@ static void CheckOptions()
 
 	// Options for the CMD HD emulation itself.
 	piCMDHD.SetForcedDeviceID((u8)options.GetCMDHDDeviceID());
-	ScsiImage::InitCache(options.GetCMDHDCacheMB() * 1024 * 1024);
+	piCMDHD.SetPreloadMB(options.GetCMDHDPreloadMB());
+	// Clamp before converting to bytes: the multiply is 32 bit, so 4096 lands on
+	// exactly 2^32 and comes out as zero - which InitCache would round up to its
+	// 16 slot floor and leave a 64KB cache, the worst possible outcome for a
+	// setting someone raised on purpose. Anything above the cap cannot fit under
+	// the heap ceiling anyway, and InitCache halves its way down from there.
+	u32 cacheMB = options.GetCMDHDCacheMB();
+	if (cacheMB > 512)
+		cacheMB = 512;
+	ScsiImage::InitCache(cacheMB * 1024 * 1024);
 	EMMCBlockingWaitHook = ServiceIECWhileCardBusy;
+
+#if not defined(EXPERIMENTALZERO)
+	// Say how much cache was actually obtained. DEBUG_LOG is compiled out of a
+	// release build, so this used to be invisible - and no cache at all means
+	// every sector access stalls the drive on the card.
+	{
+		u32 cacheKB = ScsiImage::CacheSizeKB();
+		if (cacheKB == 0)
+		{
+			snprintf(tempBuffer, tempBufferSize, "WARNING: no CMD HD disk cache (allocation failed)");
+			screen.PrintText(false, 0, heightScreen - 32, tempBuffer, COLOUR_WHITE, COLOUR_RED);
+		}
+		else if (options.ShowOptions())
+		{
+			snprintf(tempBuffer, tempBufferSize, "CMD HD disk cache = %u KB", cacheKB);
+			screen.PrintText(false, 0, heightScreen - 32, tempBuffer, COLOUR_WHITE, COLOUR_BLACK);
+		}
+	}
+#endif
 
 	inputMappings->INPUT_BUTTON_ENTER = options.GetButtonEnter();
 	inputMappings->INPUT_BUTTON_UP = options.GetButtonUp();

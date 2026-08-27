@@ -63,6 +63,22 @@ enum
 #define VIA_REG_ORA    1
 #define VIA_REG_ORA_NH 15
 
+#if PICMD_SPLIT_CPUVIAS
+u64 PiCMDHD::subCycles[3];
+u32 PiCMDHD::subSamples = 0;
+u32 PiCMDHD::diagReadCost[4];
+#endif
+u32 PiCMDHD::armClockHz = 0;
+u32 PiCMDHD::lostCycles = 0;
+u32 PiCMDHD::lostHist[16];
+u64 PiCMDHD::loopIterations = 0;
+u64 PiCMDHD::sectionCycles[4];
+u32 PiCMDHD::worstLostUs = 0;
+u32 PiCMDHD::scsiBusReads = 0;
+u32 PiCMDHD::scsiBusMismatches = 0;
+u8 PiCMDHD::scsiBusMismatchXor = 0;
+u8 PiCMDHD::scsiBusMismatchDdr = 0;
+
 ///////////////////////////////////////////////////////////////////////////////
 // CPU bus functions
 ///////////////////////////////////////////////////////////////////////////////
@@ -329,6 +345,7 @@ void PiCMDHD::Initialise()
 	scanNeeded = true;
 	LEDs = 0;
 	forcedDeviceID = 0;
+	preloadMB = 0;
 	headPosition = 0;
 	imagesize = 0;
 	baselba = INVALID_BASELBA;
@@ -338,6 +355,7 @@ void PiCMDHD::Initialise()
 	virtualButtonCountdown = 0;
 	virtualButtonMask = 0;
 	fastSerialDirection = FAST_SERIAL_DIR_IN;
+	rtcTickCountdown = RTC_TICK_CYCLES;
 
 	memset(ram, 0, sizeof(ram));
 	memset(&scsi, 0, sizeof(scsi));
@@ -571,6 +589,22 @@ bool PiCMDHD::Insert(const char* filename, bool readOnly)
 	scanNeeded = true;
 	FindBaseLBA();
 
+	// Pull the working area of the image into RAM while nothing is listening.
+	// A cache miss costs an SD access, an SD access freezes the emulated CPU
+	// for tens of milliseconds, and the bus gives up on us long before that -
+	// so the miss that lands in the middle of a transfer is fatal. Paying for
+	// them all here, once, is the whole point.
+	if (preloadMB)
+	{
+		disk[0].PreloadCache(preloadMB * 1024 * 1024, &scanSector, &scanTotal);
+	}
+
+	// The scan above walks the whole image off the card, so it sets the stall
+	// watermark and the read counters before the computer has asked for
+	// anything. Start the figures here, or they describe the mount instead of
+	// whatever goes wrong afterwards.
+	ScsiImage::ResetCounters();
+
 	// look to see if there are more files with the same base name, but
 	// s<ID><LUN> extensions: s01, ..., s10, ..., s67 (VICE convention)
 	int len = (int)strlen(filename);
@@ -610,6 +644,154 @@ bool PiCMDHD::Insert(const char* filename, bool readOnly)
 
 void PiCMDHD::Eject()
 {
+	// Last chance to get the access log off the machine. The bus is finished
+	// with us by now, so the card can take as long as it likes. Done before
+	// the Detach loop only so a failure here cannot leave an image attached.
+	// The two numbers this build exists for, written where they cannot be lost
+	// to somebody forgetting to photograph the screen. Eject only, so it costs
+	// the emulation loop nothing.
+	{
+		char name[32];
+		FILINFO fno;
+		for (unsigned n = 0; n <= 99; ++n)
+		{
+			snprintf(name, sizeof(name), "PICMD-LST%02u.LOG", n);
+			if (f_stat(name, &fno) == FR_OK)
+				continue;
+			FIL fp;
+			if (f_open(&fp, name, FA_CREATE_ALWAYS | FA_WRITE) == FR_OK)
+			{
+				char line[128];
+				UINT written;
+				int len = snprintf(line, sizeof(line),
+					"arm %u Hz  budget %u cycles/us\r\n",
+					PiCMDHD::armClockHz, PiCMDHD::armClockHz / 1000000);
+				if (len > 0)
+					f_write(&fp, line, (UINT)len, &written);
+				len = snprintf(line, sizeof(line),
+					"loops %llu  lost %u (%u per mille, %u ppm)  worst %u us\r\n",
+					(unsigned long long)PiCMDHD::loopIterations, PiCMDHD::lostCycles,
+					PiCMDHD::loopIterations
+						? (u32)((u64)PiCMDHD::lostCycles * 1000
+							/ PiCMDHD::loopIterations) : 0,
+					PiCMDHD::loopIterations
+						? (u32)((u64)PiCMDHD::lostCycles * 1000000
+							/ PiCMDHD::loopIterations) : 0,
+					PiCMDHD::worstLostUs);
+				if (len > 0)
+					f_write(&fp, line, (UINT)len, &written);
+#if PICMD_SPLIT_CPUVIAS
+				len = snprintf(line, sizeof(line),
+					"read cost: gplev %u  filler %u  gplev+filler %u  systimer %u\r\n",
+					PiCMDHD::diagReadCost[0], PiCMDHD::diagReadCost[1],
+					PiCMDHD::diagReadCost[2], PiCMDHD::diagReadCost[3]);
+				if (len > 0)
+					f_write(&fp, line, (UINT)len, &written);
+				len = snprintf(line, sizeof(line),
+					"U9  everT1 %u everT2 %u everACR %u  acr %02x ier %02x  ticking %u/%u\r\n",
+					(via9.DiagFlags() & 1) ? 1u : 0u, (via9.DiagFlags() & 2) ? 1u : 0u,
+					(via9.DiagFlags() & 4) ? 1u : 0u, via9.DiagAcr(), via9.DiagIer(),
+					via9.DiagT1Ticking() ? 1u : 0u, via9.DiagT2Counting() ? 1u : 0u);
+				if (len > 0)
+					f_write(&fp, line, (UINT)len, &written);
+				len = snprintf(line, sizeof(line),
+					"idle skips: U9 %u / %u runs   U10 %u / %u runs\r\n",
+					via9.IdleSkips(), via9.IdleSkips() + via9.BusyRuns(),
+					via10.IdleSkips(), via10.IdleSkips() + via10.BusyRuns());
+				if (len > 0)
+					f_write(&fp, line, (UINT)len, &written);
+				len = snprintf(line, sizeof(line),
+					"U10 everT1 %u everT2 %u everACR %u  acr %02x ier %02x  ticking %u/%u\r\n",
+					(via10.DiagFlags() & 1) ? 1u : 0u, (via10.DiagFlags() & 2) ? 1u : 0u,
+					(via10.DiagFlags() & 4) ? 1u : 0u, via10.DiagAcr(), via10.DiagIer(),
+					via10.DiagT1Ticking() ? 1u : 0u, via10.DiagT2Counting() ? 1u : 0u);
+				if (len > 0)
+					f_write(&fp, line, (UINT)len, &written);
+				if (PiCMDHD::subSamples)
+				{
+					static const char* subNames[3] = {
+						"  65c02 Step      ", "  via9+via10 Exec ", "  rest of Update  " };
+					for (u32 k = 0; k < 3; k++)
+					{
+						len = snprintf(line, sizeof(line),
+							"%s: %u cycles per emulated CPU cycle\r\n", subNames[k],
+							(u32)(PiCMDHD::subCycles[k] / PiCMDHD::subSamples));
+						if (len > 0)
+							f_write(&fp, line, (UINT)len, &written);
+					}
+				}
+#endif
+				// The single card operation that took longest, from NoteStall.
+				// It belongs next to "worst" above because the two answer
+				// different questions and the difference is the whole point:
+				// "worst" is the longest the emulation loop overran, which
+				// includes however many card writes one visit to the flush
+				// batched together; this is the longest ONE of them took. When
+				// they are equal the batching is gone and what is left is the
+				// card's own tail latency, which is nothing this code can fix.
+				len = snprintf(line, sizeof(line),
+					"worst single SD access: %u us\r\n",
+					ScsiImage::WorstStallMicros());
+				if (len > 0)
+					f_write(&fp, line, (UINT)len, &written);
+
+				// Loud on purpose, and printed even when zero so that a zero
+				// is a statement rather than an absence. Anything else here is
+				// user data the card refused and that was dropped when the
+				// image detached.
+				len = snprintf(line, sizeof(line),
+					"UNFLUSHED SECTORS AT DETACH: %u\r\n",
+					ScsiImage::UnflushedSectors());
+				if (len > 0)
+					f_write(&fp, line, (UINT)len, &written);
+
+				// Free, and it answers the one question the deployed build
+				// otherwise cannot: whether U9 stayed idle for the whole
+				// session. t1Ticking and t2CountingDown are latches that only
+				// Reset clears, so reading them here IS the sticky answer, and
+				// if U9 ever woke up the idle skip in Execute stopped paying
+				// from that moment on with nothing in the log to say so.
+				len = snprintf(line, sizeof(line),
+					"idle at eject: U9 acr %02x t1 %u t2 %u   U10 acr %02x t1 %u t2 %u\r\n",
+					via9.AcrValue(), via9.T1Ticking() ? 1u : 0u, via9.T2Counting() ? 1u : 0u,
+					via10.AcrValue(), via10.T1Ticking() ? 1u : 0u, via10.T2Counting() ? 1u : 0u);
+				if (len > 0)
+					f_write(&fp, line, (UINT)len, &written);
+#if PICMD_SECTION_PROBES
+				static const char* names[4] = {
+					"read IEC ", "cpu+vias ", "drive IEC", "leds+btns" };
+				for (u32 sec = 0; sec < 4; sec++)
+				{
+					len = snprintf(line, sizeof(line),
+						"  %s : %u cycles/loop avg\r\n", names[sec],
+						PiCMDHD::loopIterations
+							? (u32)(PiCMDHD::sectionCycles[sec]
+								/ PiCMDHD::loopIterations) : 0);
+					if (len > 0)
+						f_write(&fp, line, (UINT)len, &written);
+				}
+#endif
+				for (u32 b = 2; b < 16; b++)
+				{
+					if (!PiCMDHD::lostHist[b])
+						continue;
+					len = snprintf(line, sizeof(line),
+						"  overran by %2u us : %u\r\n", b - 1,
+						PiCMDHD::lostHist[b]);
+					if (len > 0)
+						f_write(&fp, line, (UINT)len, &written);
+				}
+				f_close(&fp);
+			}
+			break;
+		}
+	}
+
+#if PICMD_ACCESS_FORENSICS
+	ScsiImage::DumpAccessLog("PICMD-LBA");
+	ScsiImage::DumpWriteLog("PICMD-WR");
+#endif
+
 	for (int i = 0; i < SCSI_MAX_DISKS; i++)
 	{
 		disk[i].Detach();
@@ -664,8 +846,24 @@ u8 PiCMDHD::Read(u16 address)
 			if (reg == VIA_REG_ORA || reg == VIA_REG_ORA_NH)
 			{
 				// Reading the SCSI data bus; PRA accesses generate ACK.
-				via9.GetPortA()->SetInput(scsi_get_bus(&scsi));
+				u8 bus = scsi_get_bus(&scsi);
+				via9.GetPortA()->SetInput(bus);
 				value = via9.Read(reg);
+				// Did the CPU get what the bus was holding? See the note on
+				// scsiBusReads in the header: a direction bit left as an
+				// output, or a stale CA1 latch, both replace bus bits here,
+				// and on an inverted bus that arrives as ones in the data.
+				if (scsi.io)
+				{
+					scsiBusReads++;
+					if (value != bus)
+					{
+						u8 differing = (u8)(value ^ bus);
+						scsiBusMismatches++;
+						scsiBusMismatchXor |= differing;
+						scsiBusMismatchDdr |= (u8)(via9.GetPortA()->GetDirection() & differing);
+					}
+				}
 				if (scsi.state != SCSI_STATE_BUSFREE && reg == VIA_REG_ORA)
 				{
 					scsi_process_ack(&scsi);
@@ -854,10 +1052,59 @@ void PiCMDHD::Write(u16 address, u8 value)
 // Per cycle update
 ///////////////////////////////////////////////////////////////////////////////
 
+// Called from the once-every-256-loops block in EmulateCMDHD, with the number
+// of emulated CPU cycles that have passed since the last call. Everything here
+// used to run per emulated cycle and does not need to.
+//
+// The tests are crossings, not equalities, and the reason is narrower than it
+// first looks - worth writing down, because the obvious justification is wrong.
+// The cold boot countdown IS an exact multiple of the step (16,000,000 = 512 x
+// 31,250), so "== 0" would have worked there and hidden the bug. It is the warm
+// reset countdown of 1,000,000 that leaves a remainder of 64 and would step
+// straight over zero, underflow, and leave SWAP8 and SWAP9 virtually held for
+// another four billion cycles - the drive stuck in installation mode after a
+// front panel reset but not after a power cycle, which is exactly the kind of
+// fault that takes a week to pin down. RTC_TICK_CYCLES has the same remainder.
+// The same trap took out every front panel button the first time this loop was
+// decimated - see UpdateButton in iec_bus.h.
+void PiCMDHD::SlowTick(u32 emulatedCycles)
+{
+	if (rtcTickCountdown > emulatedCycles)
+	{
+		rtcTickCountdown -= emulatedCycles;
+	}
+	else
+	{
+		rtcTickCountdown = RTC_TICK_CYCLES;
+		rtc.Tick();
+	}
+
+	if (virtualButtonCountdown)
+	{
+		if (virtualButtonCountdown > emulatedCycles)
+		{
+			virtualButtonCountdown -= emulatedCycles;
+		}
+		else
+		{
+			virtualButtonCountdown = 0;
+			virtualButtonMask = 0;
+			UpdateButtonInputs();
+		}
+	}
+}
+
 void PiCMDHD::Update()
 {
+#if PICMD_SPLIT_CPUVIAS
+	u32 t0 = PiCMDArmCycles();
+#endif
 	via9.Execute();
 	via10.Execute();
+#if PICMD_SPLIT_CPUVIAS
+	u32 t1 = PiCMDArmCycles();
+	subCycles[1] += (u32)(t1 - t0);
+#endif
 
 	// Wire-OR the two VIA IRQ outputs onto the CPU IRQ line.
 	if (via9IRQ.IsAsserted() || via10IRQ.IsAsserted())
@@ -875,17 +1122,24 @@ void PiCMDHD::Update()
 	else
 	{
 		// DATA is sent to CB2, SRQ is sent to CB1.
-		via10.InputCB2(!IEC_Bus::GetPI_Data());	// Communication on fast serial is done before the inverter.
-		via10.InputCB1(IEC_Bus::GetPI_SRQ());
+		// PI_Data and PI_SRQ are deliberately NOT refreshed by the trimmed
+		// mid-loop sample, so both calls see the same value on the second
+		// emulated cycle as on the first. Do not "fix" that. It keeps CB2, the
+		// fast serial data bit, in a fixed phase against the CB1 shift clock -
+		// moving it half a microsecond could change which side of an SRQ edge a
+		// bit lands on, which manufactures corruption in the mechanism under
+		// investigation - and it is also what makes the level guards below hit
+		// every second call.
+		via10.InputCB2Level(!IEC_Bus::GetPI_Data());	// Communication on fast serial is done before the inverter.
+		via10.InputCB1Level(IEC_Bus::GetPI_SRQ());
 	}
 
-	// Installation mode holds SWAP8+SWAP9 virtually for a while after reset.
-	if (virtualButtonCountdown)
-	{
-		if (--virtualButtonCountdown == 0)
-		{
-			virtualButtonMask = 0;
-			UpdateButtonInputs();
-		}
-	}
+	// The RTC tick and the virtual button countdown used to live here, one
+	// decrement each per emulated CPU cycle. They are now in SlowTick below:
+	// both have periods measured in hundreds of thousands of cycles, so a
+	// quarter of a millisecond of granularity is nothing, and two decrements
+	// out of the hot path is real.
+#if PICMD_SPLIT_CPUVIAS
+	subCycles[2] += (u32)(PiCMDArmCycles() - t1);
+#endif
 }
