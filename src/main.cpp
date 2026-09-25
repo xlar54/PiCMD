@@ -999,7 +999,7 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 		// The CMD HD's 65C02 runs at 2MHz; two CPU cycles per 1MHz loop.
 		for (int cycle2MHz = 0; cycle2MHz < 2; ++cycle2MHz)
 		{
-			if (PICMD_SECOND_SAMPLE && cycle2MHz)
+			if (PICMD_SECOND_SAMPLE && !PICMD_PORT_READ_SAMPLE && cycle2MHz)
 				IEC_Bus::ReadBusInputsCMDHD();
 			piCMDHD.m65c02.Step();
 			piCMDHD.Update();

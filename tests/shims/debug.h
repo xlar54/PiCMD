@@ -14,6 +14,9 @@ namespace TestLog
 	extern bool enabled;
 }
 
+#ifdef DEBUG_LOG
+#undef DEBUG_LOG
+#endif
 #define DEBUG_LOG(...) \
 	do { if (TestLog::enabled) fprintf(stderr, __VA_ARGS__); } while (0)
 

@@ -107,3 +107,13 @@ shift input with guarded pin updates. Run with the idle optimization disabled to
 ```
 make -C tests -B CXX="g++ -DPICMD_VIA_IDLE_SKIP=0"
 ```
+
+`test_iec_bus.cpp` compiles the real IEC implementation against captured GPIO
+reads/writes. It checks reset updates without a VIA, release snapshot guards,
+port-only sampling, and optional fast DATA/SRQ output ordering for both
+inversion settings. These checks do not model wire rise time or receiver setup
+and hold requirements. Exercise the experimental output path with:
+
+```
+make -C tests -B CXX="g++ -DPICMD_PORT_READ_SAMPLE=1 -DPICMD_FAST_SERIAL_PUSH=1"
+```

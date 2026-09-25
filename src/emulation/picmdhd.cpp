@@ -742,7 +742,10 @@ u8 PiCMDHD::Read(u16 address)
 		case 0x0: // 0x80xx U10
 		case 0x1: // 0x81xx U10
 			reg = address & 15;
-#if !PICMD_SECOND_SAMPLE
+#if PICMD_PORT_READ_SAMPLE
+			if (reg == VIA_REG_ORB)
+				IEC_Bus::ReadBusInputsCMDHD();
+#elif !PICMD_SECOND_SAMPLE
 			if (reg == VIA_REG_ORB)
 				IEC_Bus::SampleIECInsNow();
 #endif
@@ -958,8 +961,7 @@ void PiCMDHD::Update()
 	if (fastSerialDirection == FAST_SERIAL_DIR_OUT)
 	{
 		// CB2 (data) is sent to DATA, CB1 (shift clock) is sent to SRQ.
-		IEC_Bus::SetFastSerialData(!via10.GetShiftDataOut());	// Communication on fast serial is done after the inverter.
-		IEC_Bus::SetFastSerialSRQ(via10.GetShiftClockOut());
+		IEC_Bus::SetFastSerialOutputs(!via10.GetShiftDataOut(), via10.GetShiftClockOut());
 	}
 	else
 	{

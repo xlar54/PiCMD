@@ -494,30 +494,65 @@ Supply your own dump - see "What you need on the SD card" above.
 
 ### Development: IEC timing and cache integration
 
-The `dev/iec-cache-integration` branch ports the timing and bounded-cache work
-from PR #19 onto current main. Immediate GPIO output updates, timestamp-based
-button debounce, SCSI error propagation, deadline-based reset flushing, and
-physical-media VERIFY remain in place. The new snapshot-based mid-cycle input
-sample replaces the live port-read sample while `PICMD_SECOND_SAMPLE` is enabled;
-this keeps newly released lines from being sampled before they rise, and leaves
-fast-serial DATA/SRQ sampling together at the top of the loop.
+The `dev/iec-cache-integration` branch ports PR #19 selectively onto current
+main. Immediate DATA/CLOCK/ATN output, timestamp-based button debounce, SCSI
+error propagation, reset flush deadlines, and physical-media VERIFY survive.
+The VIA tests also exposed two fixes kept here: initialize the IRQ pointer and
+release the connected IRQ line on reset even after IFR has been cleared.
 
 The cache defaults to 24 MB and falls back to smaller allocations below the
 exception-vector page. Preloading defaults to 18 MB and pins only the primary
-image; companion images share the remaining cache. Idle flushing performs at
-most one chunk or one metadata sync per visit across all images. A chunk may
-require up to four writes; a card operation already in progress cannot be
-interrupted. Reset retains its existing time budget and eject forces a flush.
-Always eject before removing the card or switching off power.
+image; companions use the remaining cache. Idle flushing performs at most one
+chunk or one metadata sync per visit across all images. A chunk may require up
+to four writes; an in-progress card operation cannot be interrupted. Reset
+retains its time budget and eject forces a flush. Eject before power-off.
 
-With `CMDHDEjectLog = 1` (default 0), after all images detach,
-`PICMD-EJECT.LOG` in FatFS's current working directory records the
-latest eject's unwritten-sector count and write errors during detach. A failing
-or read-only card may also prevent writing this report. A zero sector count does
-not rule out metadata/close failures; inspect the write-error count as well.
+Eject reporting is **off by default**. Set `CMDHDEjectLog = 1` in `options.txt`
+to write `PICMD-EJECT.LOG` in **FatFS's current working directory** after all
+images detach. It replaces the previous report. It records discarded sectors
+and write errors during detach; zero discarded sectors does not rule out
+metadata/close errors. A failing or read-only card may also refuse the report.
+`ScsiImage::UnflushedSectors()` and `WriteErrorCount()` remain available in RAM
+with logging off, and write errors still feed the drive's status/display.
 
-Before merging, test the rebuilt kernel on the Pi with BASIC LOAD/SAVE,
-GEOS/GDOS installation and directory reads, fast serial, front-panel warm reset,
-and companion images. Compare both bisection switches in `src/picmd_switches.h`
-using clean builds. Host tests and successful firmware builds do not validate
-physical IEC timing.
+Hardware comparison switches live in `src/picmd_switches.h`. Use a clean build
+for each configuration; compare one change at a time with the same workload,
+card and starting image. Host checks cannot establish physical IEC timing.
+
+| Switch | Default | Meaning |
+| --- | --- | --- |
+| `PICMD_EMMC_FAST_POLL` | 1 | Poll without the old millisecond sleeps; 0 restores the old wait algorithm. |
+| `PICMD_EMMC_WAIT_DIAGNOSTICS` | 0 | Count waits, total/max elapsed microseconds and timeouts in RAM. |
+| `PICMD_SECOND_SAMPLE` | 1 | Snapshot-guarded port-only input sample before the second CPU cycle. |
+| `PICMD_PORT_READ_SAMPLE` | 0 | When 1, replace the mid-cycle sample with the same guarded sample at ORB reads. |
+| `PICMD_FAST_SERIAL_PUSH` | 0 | Experimental DATA-then-SRQ output after each CPU update, on changes. |
+| `PICMD_VIA_IDLE_SKIP` | 1 | Skip timer/shift work while the VIA is idle. |
+
+1. **Measure SD polling first.** Build with wait diagnostics enabled and eject
+   logging opted in. Compare `PICMD_EMMC_FAST_POLL = 0` and `1`, leaving the
+   IEC switches unchanged. The report's `EMMC` line includes the polling mode,
+   calls, total/max microseconds and timeouts. Counters reset after mount/preload
+   and are captured after detach but before opening the report, excluding the
+   report's own writes. Diagnostics add two timer reads per wait; enable them
+   in both builds. Totals include the wait hook's time and are not the entire
+   SD-access time. The old algorithm checked readiness after 1 us and slept
+   about 1 ms only after a failed poll. Its contribution to historical 35 ms
+   access times is a hypothesis, not an established measurement.
+2. **Compare input sampling.** Keep fast-serial pushing off. Compare the default
+   mid-cycle sample with `PICMD_PORT_READ_SAMPLE = 1`, which suppresses the
+   mid-cycle read rather than adding a second one. Both use saved output flags
+   so newly released lines get time to rise. Both update only VIA port inputs:
+   changing `PI_Data` at an ORB read while keeping the older `PI_SRQ` can feed
+   incoherent DATA/clock samples into the fast-serial receiver. Setting both
+   sampling switches to zero restores main's legacy live sampler for comparison.
+3. **Then test fast-serial output.** With the chosen input mode fixed, compare
+   `PICMD_FAST_SERIAL_PUSH = 0` and `1`. Previously, fast DATA/SRQ flags changed
+   twice per loop but reached GPIO only at the periodic refresh. The experiment
+   updates DATA before SRQ on each changed CPU-cycle pair and restores DATA
+   after intervening slow-port writes. SRQ output requires split IEC wiring;
+   non-split fast-serial output remains unsupported. GPIO ordering is tested,
+   but real setup/hold time, receiver behavior and CPU budget need measurement.
+
+Exercise BASIC LOAD/SAVE, GEOS/GDOS and WHEELS directory/install workflows,
+fast serial in both directions, front-panel warm reset, and companion images.
+The branch remains for development until these hardware checks pass.
