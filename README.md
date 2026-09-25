@@ -552,6 +552,10 @@ card and starting image. Host checks cannot establish physical IEC timing.
    after intervening slow-port writes. SRQ output requires split IEC wiring;
    non-split fast-serial output remains unsupported. GPIO ordering is tested,
    but real setup/hold time, receiver behavior and CPU budget need measurement.
+   PB5's buffer-direction disconnect is not modeled: a slow-port DATA write
+   can still briefly reach the wire before the fast update restores it. Watch
+   this transient on the scope if enabling the push makes transfers worse;
+   the restore test does not prove that the transient is harmless.
 
 Exercise BASIC LOAD/SAVE, GEOS/GDOS and WHEELS directory/install workflows,
 fast serial in both directions, front-panel warm reset, and companion images.
