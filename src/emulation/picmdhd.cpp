@@ -23,6 +23,7 @@
 #include "picmdhd.h"
 #include "iec_bus.h"
 #include "debug.h"
+#include "emmc.h"
 
 extern PiCMDHD piCMDHD;
 
@@ -650,6 +651,10 @@ bool PiCMDHD::Insert(const char* filename, bool readOnly)
 		scsi.file[i] = disk[i].IsAttached() ? &disk[i] : 0;
 	}
 
+#if PICMD_EMMC_WAIT_DIAGNOSTICS
+	// Exclude mount/preload. Include emulation and the final detach flush.
+	EMMCResetWaitStats();
+#endif
 	return true;
 }
 
@@ -668,6 +673,10 @@ void PiCMDHD::Eject()
 	// this file, so the in-memory write-error counter remains authoritative.
 	if (hadImage && ejectLog)
 	{
+#if PICMD_EMMC_WAIT_DIAGNOSTICS
+		// Snapshot before opening the report: its own writes must not count.
+		EMMCWaitStats waits = EMMCGetWaitStats();
+#endif
 		FIL report;
 		if (f_open(&report, "PICMD-EJECT.LOG", FA_CREATE_ALWAYS | FA_WRITE) == FR_OK)
 		{
@@ -679,6 +688,14 @@ void PiCMDHD::Eject()
 			UINT written;
 			if (n > 0 && (unsigned)n < sizeof(line))
 				f_write(&report, line, (UINT)n, &written);
+#if PICMD_EMMC_WAIT_DIAGNOSTICS
+			n = snprintf(line, sizeof(line),
+				"EMMC fast=%u calls=%llu total_us=%llu max_us=%u timeouts=%u\r\n",
+				(unsigned)PICMD_EMMC_FAST_POLL, (unsigned long long)waits.calls,
+				(unsigned long long)waits.totalMicros, waits.maxMicros, waits.timeouts);
+			if (n > 0 && (unsigned)n < sizeof(line))
+				f_write(&report, line, (UINT)n, &written);
+#endif
 			f_close(&report);
 		}
 	}

@@ -1979,15 +1979,38 @@ int CEMMCDevice::DoWrite(u8 *buf, size_t buf_size, u32 block_no)
 
 void (*EMMCBlockingWaitHook)(void) = 0;
 
+#if PICMD_EMMC_WAIT_DIAGNOSTICS
+static EMMCWaitStats waitStats = {};
+void EMMCResetWaitStats() { waitStats = EMMCWaitStats(); }
+EMMCWaitStats EMMCGetWaitStats() { return waitStats; }
+
+// One aggregate update per completed wait; never perform card I/O here.
+struct EMMCWaitProbe
+{
+	u32 start;
+	bool success;
+	EMMCWaitProbe() : start(read32(ARM_SYSTIMER_CLO)), success(false) {}
+	~EMMCWaitProbe()
+	{
+		u32 elapsed = read32(ARM_SYSTIMER_CLO) - start;
+		++waitStats.calls;
+		waitStats.totalMicros += elapsed;
+		if (elapsed > waitStats.maxMicros) waitStats.maxMicros = elapsed;
+		if (!success) ++waitStats.timeouts;
+	}
+};
+#endif
+
 int CEMMCDevice::TimeoutWait(unsigned reg, unsigned mask, int value, unsigned usec)
 {
-	// Poll as fast as the peripheral will answer. This used to sleep a whole
-	// millisecond between looks, which kept the overall timeout right but made
-	// every wait cost a millisecond even when the card was ready in tens of
-	// microseconds - and a single block transfer goes through several of them
-	// (command complete, data ready per block, transfer complete). That, not
-	// the card, was most of the tens of milliseconds an SD access was measured
-	// at, and everything above this driver is built to work around that number.
+#if PICMD_EMMC_WAIT_DIAGNOSTICS
+	EMMCWaitProbe probe;
+#endif
+#if PICMD_EMMC_FAST_POLL
+
+	// The old loop checked once after 1 us, then slept about 1 ms after
+	// each unsuccessful poll. Measure how much that contributes to card
+	// latency; this code alone cannot attribute the historical 35 ms stalls.
 	unsigned start = read32(ARM_SYSTIMER_CLO);
 	unsigned lastService = start;
 
@@ -1995,6 +2018,9 @@ int CEMMCDevice::TimeoutWait(unsigned reg, unsigned mask, int value, unsigned us
 	{
 		if ((read32(reg) & mask) ? value : !value)
 		{
+#if PICMD_EMMC_WAIT_DIAGNOSTICS
+			probe.success = true;
+#endif
 			return 0;
 		}
 
@@ -2014,4 +2040,41 @@ int CEMMCDevice::TimeoutWait(unsigned reg, unsigned mask, int value, unsigned us
 			EMMCBlockingWaitHook();
 		}
 	}
+#else
+
+	unsigned nCount = usec / 1000;
+
+	do
+	{
+		delay_us(1);
+
+		if ((read32(reg) & mask) ? value : !value)
+		{
+#if PICMD_EMMC_WAIT_DIAGNOSTICS
+			probe.success = true;
+#endif
+			return 0;
+		}
+
+		// Wait out the rest of the millisecond in short steps, giving whoever
+		// registered the hook a chance to keep the outside world serviced.
+		// Without this the emulated drive goes deaf for the whole access and
+		// the computer decides it has been unplugged.
+		if (EMMCBlockingWaitHook)
+		{
+			for (int i = 0; i < 10; ++i)
+			{
+				EMMCBlockingWaitHook();
+				delay_us(99);
+			}
+		}
+		else
+		{
+			delay_us(999);
+		}
+	}
+	while(nCount--);
+
+	return -1;
+#endif
 }
