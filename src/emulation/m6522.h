@@ -214,8 +214,38 @@ FCR/PCR
 	unsigned char GetLatchedValueB() { return latchedValueB; }
 	inline bool GetCB1() { return cb1; }
 	void InputCB1(bool value);
+	// Called once per emulated CPU cycle from PiCMDHD::Update whether or not
+	// the line has moved, which on a C64 is almost always. Both bodies do
+	// nothing at all when the new level equals the old one, so the test can be
+	// hoisted here and the call saved - four calls per emulated microsecond
+	// that no longer leave the header.
+	//
+	// The comparison has to be against the VIA's own cb1/cb2 and nothing else.
+	// cb2 in particular is also cleared by the CPU writing ORB in handshake
+	// mode and by pulse mode in Execute, so a level cached outside this object
+	// would miss an edge - and a missed fast serial edge is a corrupted bit in
+	// exactly the mechanism under investigation.
+#if PICMD_VIA_IDLE_SKIP
+	// True when Execute() would provably do nothing but its two trailing
+	// assignments. Recomputed only in Write() and Reset(), which are the only
+	// places that can turn any of these on - while it is true, every setter of
+	// every term below sits inside the code the early-out skips, so the cache
+	// cannot go stale. Cheap on purpose: the version that tested all of this
+	// per call cost more than it saved.
+	void UpdateIdleCache()
+	{
+		idleCache = (auxiliaryControlRegister == 0)
+			&& !t1Ticking && !t2CountingDown
+			&& !t1TimedOut && !t2TimedOut && !t1Reload
+			&& !cb1OutputShiftClockPositiveEdge;
+	}
+#endif
+
+	inline void InputCB1Level(bool value) { if (value != cb1) InputCB1(value); }
+	inline void InputCB2Level(bool value) { if (value != cb2) InputCB2(value); }
 	inline bool GetCB2() { return cb2; }
 	void InputCB2(bool value);
+
 
 	void Execute();
 
@@ -352,6 +382,9 @@ private:
 	unsigned char latchedValueB;
 	bool cb1;
 	bool cb1Old;
+#if PICMD_VIA_IDLE_SKIP
+	bool idleCache;
+#endif
 	bool cb2;
 	bool pulseCB2;
 
@@ -376,7 +409,8 @@ private:
 	bool t2LowTimedOut;
 	bool t2OneShotTriggeredIRQ;
 	unsigned t2TimedOutCount;
-	unsigned char pb6Old;
+	// pb6Old removed: the negative edge test it fed compared a value masked
+	// with 0x40 against 1, so it could never be true. See the note in Execute.
 
 	unsigned char interruptFlagRegister;
 	unsigned char interruptEnabledRegister;

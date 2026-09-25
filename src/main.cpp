@@ -959,6 +959,8 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 	static const u32 FLUSH_IDLE_LOOPS = 500000;			// ~0.5s at this loop's 1MHz
 	static const u32 FLUSH_MAX_LOOPS = 32000000;		// ~32s
 	u32 lastAccessCount = 0;
+	static const u32 SLOW_TICK_EVERY = 256;
+	u32 slowTick = 0;
 	u32 quietLoops = 0;
 	u32 flushAfterLoops = FLUSH_IDLE_LOOPS;
 
@@ -997,117 +999,129 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 		// The CMD HD's 65C02 runs at 2MHz; two CPU cycles per 1MHz loop.
 		for (int cycle2MHz = 0; cycle2MHz < 2; ++cycle2MHz)
 		{
+			if (PICMD_SECOND_SAMPLE && cycle2MHz)
+				IEC_Bus::ReadBusInputsCMDHD();
 			piCMDHD.m65c02.Step();
 			piCMDHD.Update();
 		}
 
 		IEC_Bus::RefreshOutsCMDHD();	// Now output all outputs.
 
-		IEC_Bus::OutputLED = piCMDHD.IsActivityLEDOn();
+		// Mechanical inputs and housekeeping do not need a 1 MHz cadence.
+		// Button debounce uses real timestamps; only the virtual holds use cycles.
+		if ((++slowTick & (SLOW_TICK_EVERY - 1)) == 0)
+		{
+			piCMDHD.SlowTick(SLOW_TICK_EVERY * 2);
+			IEC_Bus::OutputLED = piCMDHD.IsActivityLEDOn();
 #if defined(RPI3)
-		if (IEC_Bus::OutputLED ^ oldLED)
-		{
-			SetACTLed(IEC_Bus::OutputLED);
-			oldLED = IEC_Bus::OutputLED;
-		}
+			if (IEC_Bus::OutputLED ^ oldLED)
+			{
+				SetACTLed(IEC_Bus::OutputLED);
+				oldLED = IEC_Bus::OutputLED;
+			}
 #endif
 
-		// Push cached writes to the card only once nothing has touched the disk
-		// and ATN has been released for a while. Any SD access freezes the
-		// emulated CPU - 35ms has been measured - and while it is frozen the
-		// drive cannot acknowledge ATN, so the computer decides it has gone
-		// away. Doing this on a timer instead landed it between SCSI commands,
-		// which is the worst possible moment.
-		{
-			u32 accessCount = ScsiImage::AccessCounter();
-			if (accessCount != lastAccessCount || IEC_Bus::IsAtnAsserted())
+			// Push cached writes to the card only once nothing has touched the disk
+			// and ATN has been released for a while. Any SD access freezes the
+			// emulated CPU - 35ms has been measured - and while it is frozen the
+			// drive cannot acknowledge ATN, so the computer decides it has gone
+			// away. Doing this on a timer instead landed it between SCSI commands,
+			// which is the worst possible moment.
 			{
-				lastAccessCount = accessCount;
-				quietLoops = 0;
-			}
-			else if (++quietLoops >= flushAfterLoops)
-			{
-				quietLoops = 0;
-
-				// Idle window - safe to touch the card.
-				//
-				// Back off when it will not take the data. A card that is full
-				// or failing fails every time, and retrying twice a second
-				// freezes the emulated CPU for the length of each attempt, so
-				// the drive drops off the bus over and over for a write that
-				// is never going to land. Doubling up to a ceiling keeps the
-				// retries going without making the fault worse than the
-				// original problem.
-				if (ScsiImage::FlushAll() != 0)
+				u32 accessCount = ScsiImage::AccessCounter();
+				if (accessCount != lastAccessCount || IEC_Bus::IsAtnAsserted())
 				{
-					flushAfterLoops <<= 1;
-					if (flushAfterLoops > FLUSH_MAX_LOOPS)
-						flushAfterLoops = FLUSH_MAX_LOOPS;
+					lastAccessCount = accessCount;
+					quietLoops = 0;
 				}
-				else
+				else if ((quietLoops += SLOW_TICK_EVERY) >= flushAfterLoops)
 				{
-					flushAfterLoops = FLUSH_IDLE_LOOPS;
+					quietLoops = 0;
+
+					// Idle window - safe to touch the card.
+					//
+					// Back off when it will not take the data. A card that is full
+					// or failing fails every time, and retrying twice a second
+					// freezes the emulated CPU for the length of each attempt, so
+					// the drive drops off the bus over and over for a write that
+					// is never going to land. Doubling up to a ceiling keeps the
+					// retries going without making the fault worse than the
+					// original problem.
+					ScsiImage::FlushResult result = ScsiImage::FlushIdle(IEC_Bus::IsAtnAsserted);
+					if (result == ScsiImage::FLUSH_ERROR)
+					{
+						flushAfterLoops <<= 1;
+						if (flushAfterLoops > FLUSH_MAX_LOOPS)
+							flushAfterLoops = FLUSH_MAX_LOOPS;
+					}
+					else
+					{
+						flushAfterLoops = FLUSH_IDLE_LOOPS;
+						if (result == ScsiImage::FLUSH_MORE)
+							quietLoops = flushAfterLoops;
+					}
 				}
 			}
-		}
 
-		IEC_Bus::ReadGPIOUserInput();
+			IEC_Bus::ReadGPIOUserInput();
 
-		// SWAP 8, SWAP 9 and WRITE PROTECT are momentary, just like the real
-		// front panel; HDOS samples them and decides what they mean.
-		if (buttonSwap8 < 5) piCMDHD.SetSwap8Button(IEC_Bus::GetInputButton(buttonSwap8));
-		if (buttonSwap9 < 5) piCMDHD.SetSwap9Button(IEC_Bus::GetInputButton(buttonSwap9));
-		if (buttonWP < 5) piCMDHD.SetWPButton(IEC_Bus::GetInputButton(buttonWP));
+			// SWAP 8, SWAP 9 and WRITE PROTECT are momentary, just like the real
+			// front panel; HDOS samples them and decides what they mean.
+			if (buttonSwap8 < 5) piCMDHD.SetSwap8Button(IEC_Bus::GetInputButton(buttonSwap8));
+			if (buttonSwap9 < 5) piCMDHD.SetSwap9Button(IEC_Bus::GetInputButton(buttonSwap9));
+			if (buttonWP < 5) piCMDHD.SetWPButton(IEC_Bus::GetInputButton(buttonWP));
 
-		// RESET fires when the button is released, so that holding one of the
-		// other buttons down while tapping RESET reproduces the real drive's
-		// start up configuration combinations.
-		if (buttonReset < 5)
-		{
-			bool resetButtonNow = IEC_Bus::GetInputButton(buttonReset);
-			if (resetButtonPrev && !resetButtonNow)
+			// RESET fires when the button is released, so that holding one of the
+			// other buttons down while tapping RESET reproduces the real drive's
+			// start up configuration combinations.
+			if (buttonReset < 5)
 			{
-				piCMDHD.Reset();
-				resetCount = 0;
+				bool resetButtonNow = IEC_Bus::GetInputButton(buttonReset);
+				if (resetButtonPrev && !resetButtonNow)
+				{
+					piCMDHD.Reset();
+					resetCount = 0;
 #if defined(RPI2)
-				asm volatile ("mrc p15,0,%0,c9,c13,0" : "=r" (ctBefore));
+					asm volatile ("mrc p15,0,%0,c9,c13,0" : "=r" (ctBefore));
 #else
-				ctBefore = read32(ARM_SYSTIMER_CLO);
+					ctBefore = read32(ARM_SYSTIMER_CLO);
 #endif
-				resetButtonPrev = false;
-				continue;
+					resetButtonPrev = false;
+					continue;
+				}
+				resetButtonPrev = resetButtonNow;
 			}
-			resetButtonPrev = resetButtonNow;
-		}
 
-		// Other core will check the uart (as it is slow) (could enable uart irqs - will they execute on this core?)
+			// Other core will check the uart (as it is slow) (could enable uart irqs - will they execute on this core?)
 #if not defined(EXPERIMENTALZERO)
-		inputMappings->CheckKeyboardEmulationMode(0, 0);
+			inputMappings->CheckKeyboardEmulationMode(0, 0);
 #endif
 
-		// Note: we deliberately do not use CheckButtonsEmulationMode()/Exit()
-		// here as those map the browser's buttons onto disk swapping and would
-		// steal the CMD HD's front panel buttons.
-		bool exitEmulation = false;
-		if (buttonExit < 5)
-		{
-			bool exitButtonNow = IEC_Bus::GetInputButton(buttonExit);
-			if (exitButtonPrev && !exitButtonNow)
-				exitEmulation = true;
-			exitButtonPrev = exitButtonNow;
-		}
+			// Note: we deliberately do not use CheckButtonsEmulationMode()/Exit()
+			// here as those map the browser's buttons onto disk swapping and would
+			// steal the CMD HD's front panel buttons.
+			bool exitEmulation = false;
+			if (buttonExit < 5)
+			{
+				bool exitButtonNow = IEC_Bus::GetInputButton(buttonExit);
+				if (exitButtonPrev && !exitButtonNow)
+					exitEmulation = true;
+				exitButtonPrev = exitButtonNow;
+			}
 #if not defined(EXPERIMENTALZERO)
-		exitEmulation |= inputMappings->KeyboardEscape();
+			exitEmulation |= inputMappings->KeyboardEscape();
 #endif
-		bool exitDoAutoLoad = inputMappings->AutoLoad();
+			bool exitDoAutoLoad = inputMappings->AutoLoad();
 
-		if (exitEmulation || exitDoAutoLoad)
-		{
-			if (exitEmulation)
-				exitReason = EXIT_KEYBOARD;
-			if (exitDoAutoLoad)
-				exitReason = EXIT_AUTOLOAD;
-		}
+			if (exitEmulation || exitDoAutoLoad)
+			{
+				if (exitEmulation)
+					exitReason = EXIT_KEYBOARD;
+				if (exitDoAutoLoad)
+					exitReason = EXIT_AUTOLOAD;
+			}
+
+		} // slow tick; IEC reset detection still runs every microsecond
 
 		// A reset on the IEC bus resets the drive but, unlike a floppy drive
 		// in a caddy workflow, a hard drive stays attached; keep emulating.
@@ -1238,10 +1252,7 @@ void emulator()
 				fileBrowser->DisplayRoot(); // TO CHECK
 
 			inputMappings->WaitForClearButtons();
-
-#if not defined(EXPERIMENTALZERO)
-			core0RefreshingScreen.Release();
-#endif
+			// No screen-lock release here: this path did not acquire it.
 		}
 	}
 	delete fileBrowser;
@@ -1485,7 +1496,10 @@ static void CheckOptions()
 
 	// Options for the CMD HD emulation itself.
 	piCMDHD.SetForcedDeviceID((u8)options.GetCMDHDDeviceID());
-	ScsiImage::InitCache(options.GetCMDHDCacheMB() * 1024 * 1024);
+	piCMDHD.SetPreloadMB(options.GetCMDHDPreloadMB());
+	u32 cacheMB = options.GetCMDHDCacheMB();
+	if (cacheMB > 512) cacheMB = 512;
+	ScsiImage::InitCache(cacheMB * 1024 * 1024);
 	EMMCBlockingWaitHook = ServiceIECWhileCardBusy;
 
 	inputMappings->INPUT_BUTTON_ENTER = options.GetButtonEnter();

@@ -469,6 +469,7 @@ public:
 	static void ReadBrowseMode(void);
 	static void ReadGPIOUserInput(void);
 	static void ReadEmulationModeCMDHD(void);
+	static void ReadBusInputsCMDHD(void);
 
 	static void WaitUntilReset(void)
 	{
@@ -836,6 +837,7 @@ private:
 	static bool VIA_Data;
 	static bool VIA_Clock;
 
+	static bool sampledDataSetToOut, sampledAtnaDataSetToOut, sampledClockSetToOut;
 	static bool DataSetToOut;
 	static bool AtnaDataSetToOut;
 	static bool ClockSetToOut;

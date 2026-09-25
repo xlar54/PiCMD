@@ -214,8 +214,12 @@ quick from then on.
 // Only works once the image HAS a stored number - see "Device numbers" below.
 //CMDHDDeviceID = 0
 
-// Size in MB of the RAM cache in front of the DHD image (default 32)
-//CMDHDCacheMB = 32
+// Size in MB of the RAM cache in front of the DHD image (default 24)
+//CMDHDCacheMB = 24
+
+// MB to preload and pin at mount (default 18; 0 disables).
+// Capped at three quarters of the allocated cache; the rest serves other data.
+//CMDHDPreloadMB = 18
 
 // GPIO used to pull the IEC ATN line low (0 = off, 24 on a Pi1541io).
 // Needed only so the SWAP buttons can reprogram another drive - see
@@ -484,3 +488,32 @@ GPL v3, like Pi1541 - see [LICENSE](LICENSE), and
 
 The CMD HD boot ROM is **not** included and is not covered by that licence.
 Supply your own dump - see "What you need on the SD card" above.
+
+### Development: IEC timing and cache integration
+
+The `dev/iec-cache-integration` branch ports the timing and bounded-cache work
+from PR #19 onto current main. Immediate GPIO output updates, timestamp-based
+button debounce, SCSI error propagation, deadline-based reset flushing, and
+physical-media VERIFY remain in place. The new snapshot-based mid-cycle input
+sample replaces the live port-read sample while `PICMD_SECOND_SAMPLE` is enabled;
+this keeps newly released lines from being sampled before they rise, and leaves
+fast-serial DATA/SRQ sampling together at the top of the loop.
+
+The cache defaults to 24 MB and falls back to smaller allocations below the
+exception-vector page. Preloading defaults to 18 MB and pins only the primary
+image; companion images share the remaining cache. Idle flushing performs at
+most one chunk or one metadata sync per visit across all images. A chunk may
+require up to four writes; a card operation already in progress cannot be
+interrupted. Reset retains its existing time budget and eject forces a flush.
+Always eject before removing the card or switching off power.
+
+After all images detach, `PICMD-EJECT.LOG` in the image directory records the
+latest eject's unwritten-sector count and write errors during detach. A failing
+or read-only card may also prevent writing this report. A zero sector count does
+not rule out metadata/close failures; inspect the write-error count as well.
+
+Before merging, test the rebuilt kernel on the Pi with BASIC LOAD/SAVE,
+GEOS/GDOS installation and directory reads, fast serial, front-panel warm reset,
+and companion images. Compare both bisection switches in `src/picmd_switches.h`
+using clean builds. Host tests and successful firmware builds do not validate
+physical IEC timing.

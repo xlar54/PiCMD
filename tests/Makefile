@@ -33,10 +33,10 @@ CXXFLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer
 endif
 
 # Code under test - real emulator sources, no copies.
-UNDER_TEST = $(SRCDIR)/emulation/scsi.cpp
+UNDER_TEST = $(SRCDIR)/emulation/scsi.cpp $(SRCDIR)/emulation/m6522.cpp
 
 TEST_SRCS  = main.cpp harness.cpp \
-             test_scsi_cache.cpp test_scsi_physical_read.cpp \
+             test_scsi_cache.cpp test_scsi_physical_read.cpp test_m6522.cpp \
              $(SHIMS)/ff.cpp $(SHIMS)/fakeclock.cpp $(SHIMS)/debug.cpp
 
 TARGET     = run_tests

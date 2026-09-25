@@ -64,6 +64,7 @@ extern int errno;
 
 /* Prototype for the UART write function */
 #include "rpi-aux.h"
+#include "cache.h"
 
 /* A pointer to a list of environment variables and their values. For a minimal
  environment, this empty list is adequate: */
@@ -200,6 +201,17 @@ caddr_t _sbrk(int incr)
 
   if (heap_end == 0)
     heap_end = &_end;
+
+  /* The vector page at HIGH_VECTORS_BASE remains live after boot. Keep the
+     heap below it, within L1/L2-cacheable RAM. Returning ENOMEM lets callers
+     reduce large allocations instead of overwriting vectors or uncached RAM.
+     Compare against remaining space before adding, to avoid address wrap. */
+  if (incr > 0 && ((unsigned)heap_end >= (unsigned)HIGH_VECTORS_BASE ||
+      (unsigned)incr > (unsigned)HIGH_VECTORS_BASE - (unsigned)heap_end))
+  {
+    errno = ENOMEM;
+    return (caddr_t) -1;
+  }
 
   prev_heap_end = heap_end;
   heap_end += incr;

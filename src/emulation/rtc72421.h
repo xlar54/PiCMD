@@ -46,8 +46,13 @@ public:
 	u8 Read(u8 address);
 	void Write(u8 address, u8 data);
 
+	// Bring the calendar up to date with the system timer. Reads and writes do
+	// this themselves; the caller also has to do it every so often, because the
+	// elapsed time is worked out from a 32 bit microsecond counter and a gap
+	// longer than its 71.6 minute wrap is indistinguishable from a short one.
+	void Tick();
+
 private:
-	void Tick();				// bring the calendar up to date with the system timer
 	void IncrementSecond();
 
 	u8 seconds, minutes, hours;	// binary, hours always kept in 24h form internally

@@ -57,12 +57,16 @@ CMDHDAtnOutGPIO = 24
 // So the cache is also a window in which acknowledged writes exist only in the
 // Pi's RAM. Pulling the power (or the card) inside that window loses them, and
 // the volume is then partly stale rather than obviously broken. Reset now
-// flushes, so reset-to-reboot is safe; yanking power is not.
+// makes a bounded flush attempt; eject before switching off power.
 //
 // A smaller cache narrows the window and flushes more often, at the cost of
 // more trips to the card. Try 4 if you are doing a lot of writing - installing
 // GEOS or Wheels onto a partition, say - and want less in flight.
-//CMDHDCacheMB = 32
+//CMDHDCacheMB = 24
+
+// MB to preload and pin at mount (default 18; 0 disables).
+// Capped at three quarters of the allocated cache; the rest serves other data.
+//CMDHDPreloadMB = 18
 
 // Front panel buttons. The real CMD HD has four: SWAP 8, SWAP 9,
 // WRITE PROTECT and RESET. Button 5 exits emulation (not a CMD HD function).

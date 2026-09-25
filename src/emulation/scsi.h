@@ -2,7 +2,7 @@
 //
 // SCSI disk (target) emulation.
 // Ported from VICE's scsi.c/scsi.h written by Roberto Muscedere, adapted to
-// FatFS backed image files with a write-through sector cache.
+// FatFS backed image files with a write-back sector cache.
 //
 // This file is part of Pi1541.
 //
@@ -87,6 +87,16 @@ public:
 	// ATN. Reset is also a safe moment - the drive is restarting anyway, and
 	// losing acknowledged writes there is worse than a pause.
 	static int FlushAll();
+
+	// At most one chunk OR one metadata sync across all attached images.
+	// A chunk can contain up to four discontiguous writes. Check ATN before
+	// starting work; an SD operation already in progress cannot be interrupted.
+	enum FlushResult { FLUSH_DONE, FLUSH_MORE, FLUSH_STOPPED, FLUSH_ERROR };
+	static FlushResult FlushIdle(bool (*abort)() = 0);
+	static u32 UnflushedSectors() { return unflushedSectors; }
+	static u32 CacheSizeKB() { return (numCacheSlots * CACHE_CHUNK_SIZE) >> 10; }
+	u32 PreloadCache(u32 maxBytes, volatile u32* progressSectors = 0,
+		volatile u32* totalSectors = 0);
 
 	// As FlushAll, but gives up after maxMicros of real time (0 = no limit).
 	// Reset uses this: that path is reached from the IEC RESET line with the
@@ -189,6 +199,8 @@ private:
 	static CacheSlot* cacheSlots;
 	static u32 numCacheSlots;
 	static u32 nextImageId;
+	static u32 pinnedChunks, pinnedImage, unflushedSectors;
+	u32 DirtySectorCount();
 
 	u32 imageId;
 

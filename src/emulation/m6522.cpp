@@ -22,7 +22,7 @@
 // A lot of empirical measurements, in the form of bus captures of a real Commodore 1541 VIA were taken to discover the exact behavior of the timers (especially timer 2 and all its idiosyncrasies).
 // Many comments in this file are taken from statements found in the 6522 data sheets.
 
-m6522::m6522()
+m6522::m6522() : irq(0)
 {
 	Reset();
 }
@@ -65,7 +65,6 @@ void m6522::Reset()
 	t2LowTimedOut = false;
 	t2CountingPB6Mode = false;
 	t2CountingPB6ModeOld = false;
-	pb6Old = 0;
 	t2TimedOut = false;
 	t2OneShotTriggeredIRQ = false;
 
@@ -83,7 +82,12 @@ void m6522::Reset()
 	cb1OutputShiftClock = 1;	// shift clock idles high
 	cb1OutputShiftClockPositiveEdge = false;
 	cb2Shift = 1;				// fast serial data line idles released
+	// Reset cleared IFR before OutputIRQ can observe its old IRQ bit.
+	if (irq) irq->Release();
 	OutputIRQ();
+#if PICMD_VIA_IDLE_SKIP
+	UpdateIdleCache();
+#endif
 }
 
 void m6522::InputCA1(bool value)
@@ -141,6 +145,21 @@ void m6522::Execute()
 	if (ca2 && pulseCA2) ca2 = false;
 	if (cb2 && pulseCB2) cb2 = false;
 
+	// Cache the idle predicate at Reset/Write, the only entry points that
+	// can start timers or shifting while idle. Pulse outputs above and edge
+	// history below still advance on every cycle.
+#if PICMD_VIA_IDLE_SKIP
+	if (idleCache)
+	{
+		// Faithful to the two assignments at the end of the function. cb1Old
+		// especially: dropping it would leave a stale level for the shift
+		// register's edge detector if ACR were written later.
+		cb1Old = cb1;
+		t2CountingPB6ModeOld = t2CountingPB6Mode;
+		return;
+	}
+#endif
+
 	// The t1 counter decrements on each succeeding phi2 from N to 0 and then one half phi2 cycle later IRQ goes active.
 	// (where N is the combined count value of T1CL and T1CH)
 	if (t1TimedOut)
@@ -192,8 +211,12 @@ void m6522::Execute()
 	}
 	t1Reload = false;
 
-	// Timer 2 can also be used to count negative pulses on the	PB6 line.
-	unsigned char pb6 = portB.GetInput() & ~portB.GetDirection() & 0x40;
+	// Timer 2's PB6 pulse counting mode is not emulated, and never was. What
+	// stood here read PB6 on every call to feed a negative edge test below
+	// that compared a value masked with 0x40 against 1 - so the test could
+	// never fire, for any guest, and the read was pure cost. Removing it is an
+	// exact equivalence. Making the mode actually work is a behaviour change
+	// and belongs in its own commit, with something that uses it to test.
 	unsigned char shiftMode = (auxiliaryControlRegister & ACR_SHIFTREG_CTRL) >> 2;
 
 	// The data is shifted into the shift register during the phi2 clock cycle following the positive going edge of the CB1 clock pulse.
@@ -206,7 +229,6 @@ void m6522::Execute()
 		t2TimedOut = false;
 
 		// In both modes the interrupt is only set once
-
 
 		if ((auxiliaryControlRegister & 0xc) == 4) // shift by timer 2?
 		{
@@ -252,11 +274,9 @@ void m6522::Execute()
 			// Bit 5 of the ACR determines whether the counter is decremented by the 6502 system clock or input pulses arriving on PB6.
 			if (t2CountingPB6Mode && t2CountingPB6ModeOld)
 			{
-				if (pb6 == 0 && pb6Old == 1)	// Was it the negative edge?
-				{
-					t2c.value--;
-					t2TimedOut = t2c.value == 0;
-				}
+				// The negative edge test that was here could not fire; see the
+				// note where pb6 was read. Counting stops in this mode, which
+				// is what the unreachable test amounted to anyway.
 			}
 			else
 			{
@@ -299,7 +319,6 @@ void m6522::Execute()
 			}
 		}
 	}
-	pb6Old = pb6;
 	t2CountingPB6ModeOld = t2CountingPB6Mode;
 
 	switch (shiftMode)
@@ -343,7 +362,9 @@ void m6522::Execute()
 					shiftRegister <<= 1;
 					shiftRegister |= cb2;	// Should get from current cb2 (in a 1541 these pins on the VIAs are NC, measure at 5v and read as 1s)
 					if (++bitsShiftedSoFar == 8)
+					{
 						SetInterrupt(IR_SR);
+					}
 				}
 			}
 		break;
@@ -460,7 +481,8 @@ unsigned char m6522::Read(unsigned int address)
 		break;
 		case SR:
 			value = shiftRegister;
-			if (interruptFlagRegister & IR_SR) bitsShiftedSoFar = 0;
+			if (interruptFlagRegister & IR_SR)
+				bitsShiftedSoFar = 0;
 			ClearInterrupt(IR_SR);
 		break;
 		case ACR:
@@ -715,4 +737,7 @@ void m6522::Write(unsigned int address, unsigned char value)
 			WritePortA(value, false);
 		break;
 	}
+#if PICMD_VIA_IDLE_SKIP
+	UpdateIdleCache();
+#endif
 }

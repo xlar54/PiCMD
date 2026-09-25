@@ -51,6 +51,7 @@ public:
 	inline const char* GetRomFontName() const { return ROMFontName; }
 	inline const char* GetRomNameCMDHD() const { return ROMNameCMDHD; }
 	inline unsigned int GetCMDHDDeviceID() const { return CMDHDDeviceID; }
+	inline unsigned int GetCMDHDPreloadMB() const { return CMDHDPreloadMB; }
 	inline unsigned int GetCMDHDCacheMB() const { return CMDHDCacheMB; }
 	// GPIO used to pull the IEC ATN line low (0 = the drive cannot drive ATN).
 	// 24 on a Pi1541io: its ATN level shifter is bidirectional, so the pin that
@@ -139,7 +140,8 @@ public:
 
 private:
 	unsigned int CMDHDDeviceID;
-	unsigned int CMDHDCacheMB;
+	unsigned CMDHDCacheMB;
+	unsigned CMDHDPreloadMB;
 	unsigned int CMDHDAtnOutGPIO;
 	unsigned int CMDHDLcdLamps;
 	unsigned int onResetChangeToStartingFolder;

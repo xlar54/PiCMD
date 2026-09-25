@@ -97,3 +97,13 @@ The obvious next ones, in order of value:
 3. **Register-level tests** for the 6522, 8255A and RTC. Write a register, read
    it back, assert you get what you wrote. That is exactly the RTC register F
    bit mismatch.
+
+The integration regressions also cover a shared idle-flush budget across images,
+ATN cancellation, metadata retry, pinned preload and companion-image detach,
+failed preload reads, and the final count of discarded dirty sectors.
+`test_m6522.cpp` checks timer wake-up after idle, reset IRQ release, and external
+shift input with guarded pin updates. Run with the idle optimization disabled too:
+
+```
+make -C tests -B CXX="g++ -DPICMD_VIA_IDLE_SKIP=0"
+```
