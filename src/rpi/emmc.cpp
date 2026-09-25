@@ -1979,8 +1979,69 @@ int CEMMCDevice::DoWrite(u8 *buf, size_t buf_size, u32 block_no)
 
 void (*EMMCBlockingWaitHook)(void) = 0;
 
+#if PICMD_EMMC_WAIT_DIAGNOSTICS
+static EMMCWaitStats waitStats = {};
+void EMMCResetWaitStats() { waitStats = EMMCWaitStats(); }
+EMMCWaitStats EMMCGetWaitStats() { return waitStats; }
+
+// One aggregate update per completed wait; never perform card I/O here.
+struct EMMCWaitProbe
+{
+	u32 start;
+	bool success;
+	EMMCWaitProbe() : start(read32(ARM_SYSTIMER_CLO)), success(false) {}
+	~EMMCWaitProbe()
+	{
+		u32 elapsed = read32(ARM_SYSTIMER_CLO) - start;
+		++waitStats.calls;
+		waitStats.totalMicros += elapsed;
+		if (elapsed > waitStats.maxMicros) waitStats.maxMicros = elapsed;
+		if (!success) ++waitStats.timeouts;
+	}
+};
+#endif
+
 int CEMMCDevice::TimeoutWait(unsigned reg, unsigned mask, int value, unsigned usec)
 {
+#if PICMD_EMMC_WAIT_DIAGNOSTICS
+	EMMCWaitProbe probe;
+#endif
+#if PICMD_EMMC_FAST_POLL
+
+	// The old loop checked once after 1 us, then slept about 1 ms after
+	// each unsuccessful poll. Measure how much that contributes to card
+	// latency; this code alone cannot attribute the historical 35 ms stalls.
+	unsigned start = read32(ARM_SYSTIMER_CLO);
+	unsigned lastService = start;
+
+	for (;;)
+	{
+		if ((read32(reg) & mask) ? value : !value)
+		{
+#if PICMD_EMMC_WAIT_DIAGNOSTICS
+			probe.success = true;
+#endif
+			return 0;
+		}
+
+		unsigned now = read32(ARM_SYSTIMER_CLO);
+
+		if (now - start >= usec)
+		{
+			return -1;
+		}
+
+		// Give whoever registered the hook a turn. Without this the emulated
+		// drive goes deaf for the whole access and the computer decides it has
+		// been unplugged.
+		if (EMMCBlockingWaitHook && (now - lastService) >= 100)
+		{
+			lastService = now;
+			EMMCBlockingWaitHook();
+		}
+	}
+#else
+
 	unsigned nCount = usec / 1000;
 
 	do
@@ -1989,6 +2050,9 @@ int CEMMCDevice::TimeoutWait(unsigned reg, unsigned mask, int value, unsigned us
 
 		if ((read32(reg) & mask) ? value : !value)
 		{
+#if PICMD_EMMC_WAIT_DIAGNOSTICS
+			probe.success = true;
+#endif
 			return 0;
 		}
 
@@ -2012,4 +2076,5 @@ int CEMMCDevice::TimeoutWait(unsigned reg, unsigned mask, int value, unsigned us
 	while(nCount--);
 
 	return -1;
+#endif
 }

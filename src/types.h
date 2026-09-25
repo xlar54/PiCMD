@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <uspi/types.h>
 #include "integer.h"
+#include "picmd_switches.h"
 
 typedef unsigned long long	u64;
 

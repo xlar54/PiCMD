@@ -2,7 +2,7 @@
 //
 // SCSI disk (target) emulation.
 // Ported from VICE's scsi.c written by Roberto Muscedere, adapted to
-// FatFS backed image files with a write-through sector cache.
+// FatFS backed image files with a write-back sector cache.
 //
 // This file is part of Pi1541.
 //
@@ -29,36 +29,54 @@
 #define MAXLUNS 8
 
 ///////////////////////////////////////////////////////////////////////////////
-// ScsiImage - a FatFS backed hard disk image with a write-through cache.
+// ScsiImage - a FatFS backed hard disk image with a write-back cache.
 ///////////////////////////////////////////////////////////////////////////////
 
 u8* ScsiImage::cachePool = 0;
 ScsiImage::CacheSlot* ScsiImage::cacheSlots = 0;
 u32 ScsiImage::numCacheSlots = 0;
 u32 ScsiImage::nextImageId = 0;
+u32 ScsiImage::pinnedChunks = 0;
+u32 ScsiImage::pinnedImage = 0;
+u32 ScsiImage::unflushedSectors = 0;
 
 void ScsiImage::InitCache(u32 sizeInBytes)
 {
 	if (cachePool)
 		return;
 
-	numCacheSlots = sizeInBytes >> CACHE_CHUNK_SHIFT;
-	if (numCacheSlots < 16)
-		numCacheSlots = 16;
+	u32 slots = sizeInBytes >> CACHE_CHUNK_SHIFT;
+	if (slots < 16)
+		slots = 16;
 
-	cachePool = (u8*)malloc(numCacheSlots * CACHE_CHUNK_SIZE);
-	cacheSlots = (CacheSlot*)malloc(numCacheSlots * sizeof(CacheSlot));
-
-	if (!cachePool || !cacheSlots)
+	// Settle for a smaller cache rather than none: with numCacheSlots at zero
+	// every single access goes to the card synchronously, which is exactly the
+	// stall the cache exists to avoid.
+	for (;;)
 	{
-		DEBUG_LOG("SCSI: failed to allocate %u byte cache\r\n", numCacheSlots * CACHE_CHUNK_SIZE);
+		cachePool = (u8*)malloc(slots * CACHE_CHUNK_SIZE);
+		cacheSlots = (CacheSlot*)malloc(slots * sizeof(CacheSlot));
+		if (cachePool && cacheSlots)
+			break;
+
 		free(cachePool);
 		free(cacheSlots);
 		cachePool = 0;
 		cacheSlots = 0;
-		numCacheSlots = 0;
-		return;
+
+		if (slots <= 16)
+		{
+			DEBUG_LOG("SCSI: failed to allocate %u byte cache\r\n", slots * CACHE_CHUNK_SIZE);
+			numCacheSlots = 0;
+			return;
+		}
+
+		slots >>= 1;
+		if (slots < 16)
+			slots = 16;
 	}
+
+	numCacheSlots = slots;
 
 	for (u32 i = 0; i < numCacheSlots; ++i)
 	{
@@ -119,10 +137,15 @@ void ScsiImage::Detach()
 		else if (HasDirtyChunks())
 			DEBUG_LOG("SCSI: '%s' detached with chunks still dirty - DATA LOST\r\n", name);
 
+		unflushedSectors += DirtySectorCount();
+
 		// f_close writes the directory entry, so it is the last chance for
 		// anything to go wrong and worth reporting too.
 		if (f_close(&file) != FR_OK)
+		{
+			++writeErrors;
 			DEBUG_LOG("SCSI: closing '%s' failed - the file may be truncated\r\n", name);
+		}
 		attached = false;
 
 		for (u32 i = 0; i < numAttachedImages; ++i)
@@ -134,6 +157,8 @@ void ScsiImage::Detach()
 				break;
 			}
 		}
+		// Keep the hash layout stable while companion images remain attached.
+		if (!numAttachedImages) pinnedChunks = 0;
 		sizeInSectors = 0;
 
 		for (u32 i = 0; i < numCacheSlots; ++i)
@@ -221,9 +246,12 @@ ScsiImage::CacheSlot* ScsiImage::FindSlot(u32 chunkIndex, bool allocate)
 	if (!cacheSlots)
 		return 0;
 
-	// 2-way set associative on a multiplicative hash.
-	u32 hash = (chunkIndex * 2654435761u + imageId * 40503u) % numCacheSlots;
-	u32 hash2 = (hash + 1) % numCacheSlots;
+	if (pinnedChunks && imageId == pinnedImage && chunkIndex < pinnedChunks)
+		return &cacheSlots[chunkIndex];
+	// Hash only over the unpinned region; the layout stays fixed until eject.
+	u32 span = numCacheSlots - pinnedChunks;
+	u32 hash = pinnedChunks + (chunkIndex * 2654435761u + imageId * 40503u) % span;
+	u32 hash2 = pinnedChunks + (hash + 1 - pinnedChunks) % span;
 
 	CacheSlot* slot = &cacheSlots[hash];
 	if (slot->valid && slot->image == imageId && slot->chunkIndex == chunkIndex)
@@ -592,6 +620,156 @@ bool ScsiImage::HasDirtyChunks() const
 			return true;
 	}
 	return false;
+}
+
+
+
+u32 ScsiImage::PreloadCache(u32 maxBytes, volatile u32* progressSectors, volatile u32* totalSectors)
+{
+	if (!cacheSlots || !attached || !maxBytes)
+		return 0;
+
+	// Changing the hash layout with live cache entries could hide dirty data.
+	// Preload is a mount-time operation, before the first cached access.
+	if (pinnedChunks) return 0;
+	for (u32 i = 0; i < numCacheSlots; ++i)
+		if (cacheSlots[i].valid) return 0;
+
+	// Leave a quarter of the cache hashed, so other images and anything past
+	// the preloaded region still have somewhere to go.
+	u32 chunks = maxBytes >> CACHE_CHUNK_SHIFT;
+	u32 imageChunks = (sizeInSectors + SECTORS_PER_CHUNK - 1) / SECTORS_PER_CHUNK;
+	u32 limit = numCacheSlots - (numCacheSlots >> 2);
+	if (chunks > imageChunks)
+		chunks = imageChunks;
+	if (chunks > limit)
+		chunks = limit;
+	if (!chunks)
+		return 0;
+
+	// Claim the region before filling it, so FindSlot hands back slot N for
+	// chunk N as each one lands.
+	pinnedChunks = chunks;
+	pinnedImage = imageId;
+
+	if (totalSectors)
+		*totalSectors = chunks * SECTORS_PER_CHUNK;
+
+	// Chunk N is pinned to slot N and slot N's data is cachePool + N*4K, so the
+	// whole region is contiguous in memory as well as in the file. Read it in
+	// big blocks: chunk at a time meant thousands of separate seeks and reads,
+	// which at this card's latency turned the mount into minutes.
+	const u32 BLOCK = 1u << 20;
+	u32 wanted = chunks * CACHE_CHUNK_SIZE;
+	u32 done = 0;
+
+	if (f_lseek(&file, 0) != FR_OK)
+	{
+		pinnedChunks = 0;
+		if (totalSectors)
+			*totalSectors = 0;
+		return 0;
+	}
+
+	while (done < wanted)
+	{
+		u32 ask = wanted - done;
+		if (ask > BLOCK)
+			ask = BLOCK;
+
+		UINT got = 0;
+		if (f_read(&file, cachePool + done, ask, &got) != FR_OK)
+			break;
+
+		done += got;
+		if (progressSectors)
+			*progressSectors = done / SECTOR_SIZE;
+
+		if (got < ask)
+			break;			// end of file
+	}
+
+	// Anything the file did not cover reads as zeros, the same contract
+	// FillChunk honours past EOF.
+	if (done < wanted)
+		memset(cachePool + done, 0, wanted - done);
+
+	u32 loaded = done >> CACHE_CHUNK_SHIFT;
+
+	for (u32 i = 0; i < chunks; ++i)
+	{
+		CacheSlot& slot = cacheSlots[i];
+		slot.image = imageId;
+		slot.chunkIndex = i;
+		slot.dirtyMask = 0;
+		// Only whole chunks that actually arrived are presented as valid. A
+		// partial tail is left cold so the first read fills it the usual way
+		// rather than serving a half read chunk as if it were real.
+		if (i < loaded)
+		{
+			slot.valid = 1;
+			slot.validMask = 0xff;
+		}
+		else
+		{
+			slot.valid = 0;
+			slot.validMask = 0;
+		}
+	}
+
+	if (totalSectors)
+		*totalSectors = 0;
+
+	DEBUG_LOG("SCSI: preloaded %u of %u chunks (%u KB pinned)\r\n",
+		loaded, chunks, (chunks * CACHE_CHUNK_SIZE) >> 10);
+	return loaded;
+}
+
+u32 ScsiImage::DirtySectorCount()
+{
+	u32 n = 0;
+	for (u32 i = 0; i < numCacheSlots; ++i)
+	{
+		if (!(cacheSlots[i].valid && cacheSlots[i].image == imageId))
+			continue;
+		u8 m = cacheSlots[i].dirtyMask;
+		while (m) { n += (m & 1); m >>= 1; }
+	}
+	return n;
+}
+
+ScsiImage::FlushResult ScsiImage::FlushIdle(bool (*abort)())
+{
+	for (u32 n = 0; n < numAttachedImages; ++n)
+	{
+		ScsiImage* img = attachedImages[n];
+		if (!img->attached || !img->needSync) continue;
+		if (abort && abort()) return FLUSH_STOPPED;
+		for (u32 i = 0; i < numCacheSlots; ++i)
+		{
+			CacheSlot& slot = cacheSlots[i];
+			if (!slot.valid || !slot.dirtyMask || slot.image != img->imageId) continue;
+			if (abort && abort()) return FLUSH_STOPPED;
+			if (img->FlushChunk(slot) != 0)
+			{
+				img->writeErrorPending = true;
+				++writeErrors;
+				return FLUSH_ERROR;
+			}
+			return FLUSH_MORE;
+		}
+		// Metadata is a separate visit so it cannot extend a chunk's stall.
+		if (abort && abort()) return FLUSH_STOPPED;
+		if (f_sync(&img->file) != FR_OK)
+		{
+			img->writeErrorPending = true;
+			++writeErrors;
+			return FLUSH_ERROR;
+		}
+		img->needSync = false;
+		return FLUSH_MORE;
+	}
+	return FLUSH_DONE;
 }
 
 

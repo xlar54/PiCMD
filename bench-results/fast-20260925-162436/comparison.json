@@ -1,0 +1,9 @@
+{
+    "legacy_mean_us":  511.62994945240104,
+    "fast_mean_us":  80.341090122894855,
+    "mean_wait_ratio":  6.3682226450970383,
+    "mean_wait_reduction_percent":  84.29703143670848,
+    "legacy_calls":  14244,
+    "fast_calls":  17576,
+    "interpretation":  "Wait counts differ, and an identical mix of operations and waits was not established. Mean wait improved; these figures do not measure overall file-copy speed."
+}

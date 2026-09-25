@@ -23,6 +23,7 @@
 #include "picmdhd.h"
 #include "iec_bus.h"
 #include "debug.h"
+#include "emmc.h"
 
 extern PiCMDHD piCMDHD;
 
@@ -354,6 +355,8 @@ void PiCMDHD::Initialise()
 	scanNeeded = true;
 	LEDs = 0;
 	forcedDeviceID = 0;
+	preloadMB = 0;
+	ejectLog = false;
 	headPosition = 0;
 	imagesize = 0;
 	baselba = INVALID_BASELBA;
@@ -612,6 +615,7 @@ bool PiCMDHD::Insert(const char* filename, bool readOnly)
 	imagesize = disk[0].SizeInSectors();
 	scanNeeded = true;
 	FindBaseLBA();
+	disk[0].PreloadCache(preloadMB * 1024 * 1024, &scanSector, &scanTotal);
 
 	// look to see if there are more files with the same base name, but
 	// s<ID><LUN> extensions: s01, ..., s10, ..., s67 (VICE convention)
@@ -647,15 +651,53 @@ bool PiCMDHD::Insert(const char* filename, bool readOnly)
 		scsi.file[i] = disk[i].IsAttached() ? &disk[i] : 0;
 	}
 
+#if PICMD_EMMC_WAIT_DIAGNOSTICS
+	// Exclude mount/preload. Include emulation and the final detach flush.
+	EMMCResetWaitStats();
+#endif
 	return true;
 }
 
 void PiCMDHD::Eject()
 {
+	bool hadImage = disk[0].IsAttached();
+	u32 lostBefore = ScsiImage::UnflushedSectors();
+	u32 errorsBefore = ScsiImage::WriteErrorCount();
 	for (int i = 0; i < SCSI_MAX_DISKS; i++)
 	{
 		disk[i].Detach();
 		scsi.file[i] = 0;
+	}
+	// Written only after every image has finished its final flush/close.
+	// Keep the latest eject result; a failing/unwritable card may also refuse
+	// this file, so the in-memory write-error counter remains authoritative.
+	if (hadImage && ejectLog)
+	{
+#if PICMD_EMMC_WAIT_DIAGNOSTICS
+		// Snapshot before opening the report: its own writes must not count.
+		EMMCWaitStats waits = EMMCGetWaitStats();
+#endif
+		FIL report;
+		if (f_open(&report, "PICMD-EJECT.LOG", FA_CREATE_ALWAYS | FA_WRITE) == FR_OK)
+		{
+			char line[128];
+			int n = snprintf(line, sizeof(line),
+				"UNFLUSHED SECTORS AT DETACH: %u\r\nWRITE ERRORS DURING DETACH: %u\r\n",
+				ScsiImage::UnflushedSectors() - lostBefore,
+				ScsiImage::WriteErrorCount() - errorsBefore);
+			UINT written;
+			if (n > 0 && (unsigned)n < sizeof(line))
+				f_write(&report, line, (UINT)n, &written);
+#if PICMD_EMMC_WAIT_DIAGNOSTICS
+			n = snprintf(line, sizeof(line),
+				"EMMC fast=%u calls=%llu total_us=%llu max_us=%u timeouts=%u\r\n",
+				(unsigned)PICMD_EMMC_FAST_POLL, (unsigned long long)waits.calls,
+				(unsigned long long)waits.totalMicros, waits.maxMicros, waits.timeouts);
+			if (n > 0 && (unsigned)n < sizeof(line))
+				f_write(&report, line, (UINT)n, &written);
+#endif
+			f_close(&report);
+		}
 	}
 	imagesize = 0;
 	baselba = INVALID_BASELBA;
@@ -700,8 +742,13 @@ u8 PiCMDHD::Read(u16 address)
 		case 0x0: // 0x80xx U10
 		case 0x1: // 0x81xx U10
 			reg = address & 15;
+#if PICMD_PORT_READ_SAMPLE
 			if (reg == VIA_REG_ORB)
-				IEC_Bus::SampleIECInsNow();	// event-driven DATA/CLOCK sample, see iec_bus.h
+				IEC_Bus::ReadBusInputsCMDHD();
+#elif !PICMD_SECOND_SAMPLE
+			if (reg == VIA_REG_ORB)
+				IEC_Bus::SampleIECInsNow();
+#endif
 			return via10.Read(reg);
 		case 0x4: // 0x84xx U9
 		case 0x5: // 0x85xx U9
@@ -914,21 +961,27 @@ void PiCMDHD::Update()
 	if (fastSerialDirection == FAST_SERIAL_DIR_OUT)
 	{
 		// CB2 (data) is sent to DATA, CB1 (shift clock) is sent to SRQ.
-		IEC_Bus::SetFastSerialData(!via10.GetShiftDataOut());	// Communication on fast serial is done after the inverter.
-		IEC_Bus::SetFastSerialSRQ(via10.GetShiftClockOut());
+		IEC_Bus::SetFastSerialOutputs(!via10.GetShiftDataOut(), via10.GetShiftClockOut());
 	}
 	else
 	{
 		// DATA is sent to CB2, SRQ is sent to CB1.
-		via10.InputCB2(!IEC_Bus::GetPI_Data());	// Communication on fast serial is done before the inverter.
-		via10.InputCB1(IEC_Bus::GetPI_SRQ());
+		via10.InputCB2Level(!IEC_Bus::GetPI_Data());	// Communication on fast serial is done before the inverter.
+		via10.InputCB1Level(IEC_Bus::GetPI_SRQ());
 	}
 
-	// Installation mode holds SWAP8+SWAP9 virtually for a while after reset.
+}
+
+void PiCMDHD::SlowTick(u32 emulatedCycles)
+{
+	rtc.Tick();
 	if (virtualButtonCountdown)
 	{
-		if (--virtualButtonCountdown == 0)
+		if (virtualButtonCountdown > emulatedCycles)
+			virtualButtonCountdown -= emulatedCycles;
+		else
 		{
+			virtualButtonCountdown = 0;
 			virtualButtonMask = 0;
 			UpdateButtonInputs();
 		}

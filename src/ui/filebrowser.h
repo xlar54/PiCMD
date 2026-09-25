@@ -222,7 +222,7 @@ public:
 	bool SetSelectedDHD(const char* filename, bool readOnly);
 	void DisplayDHDInfo(const char* imagePath, u32 sizeInSectors, const char* filenameForIcon);
 
-	void ShowRomName();
+	void ShowMountStatus(const char* status, const char* image, bool clearScreen = true);
 	
 
 	void ClearScreen();

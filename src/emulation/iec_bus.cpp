@@ -41,6 +41,9 @@ bool IEC_Bus::VIA_Atna = false;
 bool IEC_Bus::VIA_Data = false;
 bool IEC_Bus::VIA_Clock = false;
 
+bool IEC_Bus::sampledDataSetToOut = false;
+bool IEC_Bus::sampledAtnaDataSetToOut = false;
+bool IEC_Bus::sampledClockSetToOut = false;
 bool IEC_Bus::DataSetToOut = false;
 bool IEC_Bus::AtnaDataSetToOut = false;
 bool IEC_Bus::ClockSetToOut = false;
@@ -134,13 +137,51 @@ void IEC_Bus::ReadBrowseMode(void)
 // the addition of SRQ for fast serial. The one difference that matters is the
 // ATN acknowledge gate: the CMD HD ANDs ATNA with ATN (like the 1581) rather
 // than XORing them (like the 1541).
+// Sample port inputs between CPU cycles using the output state from the full
+// sample. Newly released lines must have time to rise before being sensed.
+void IEC_Bus::ReadBusInputsCMDHD(void)
+{
+	unsigned lev = read32(ARM_GPIO_GPLEV0);
+
+	IOPort* portB = port;
+	if (!portB)
+		return;
+
+	// The guards are a SNAPSHOT taken at the top of the loop, not the live
+	// flags, and that is the whole point.
+	//
+	// If the emulated CPU releases DATA or CLOCK during the first emulated
+	// cycle, PortB_OnPortOut puts that on the wire immediately. A live guard
+	// would be open by the time this runs a few hundred nanoseconds later, so
+	// we would sample a line that has not finished rising - open collector,
+	// pull-up, cable capacitance - and hand the drive back its own pull as if
+	// the computer were still asserting it. On the hardware that looks exactly
+	// like the fault this change exists to fix: a first symbol late or with a
+	// bit stuck low, and WORSE with the fix than without it.
+	//
+	// With the snapshot, a line released mid-loop is not sensed until the next
+	// top-of-loop sample, which is the timing the baseline has always had.
+#ifndef REAL_XOR
+	if (!sampledAtnaDataSetToOut && !sampledDataSetToOut)
+#else
+	if (!sampledDataSetToOut)
+#endif
+		portB->SetInput(VIAPORTPINS_DATAIN,
+			(lev & PIGPIO_MASK_IN_DATA) == (invertIECInputs ? PIGPIO_MASK_IN_DATA : 0));
+
+	if (!sampledClockSetToOut)
+		portB->SetInput(VIAPORTPINS_CLOCKIN,
+			(lev & PIGPIO_MASK_IN_CLOCK) == (invertIECInputs ? PIGPIO_MASK_IN_CLOCK : 0));
+}
+
 void IEC_Bus::ReadEmulationModeCMDHD(void)
 {
-	bool AtnaDataSetToOutOld = AtnaDataSetToOut;
 	IOPort* portB = 0;
 	gplev0 = read32(ARM_GPIO_GPLEV0);
+	Resetting = !ignoreReset && ((gplev0 & PIGPIO_MASK_IN_RESET) == (invertIECInputs ? PIGPIO_MASK_IN_RESET : 0));
 
 	portB = port;
+	if (!portB || !VIA) return;
 
 #ifndef REAL_XOR
 	// ATN is an input unless the drive itself is driving it (pb6), in which
@@ -250,7 +291,9 @@ void IEC_Bus::ReadEmulationModeCMDHD(void)
 		PI_SRQ = true;
 	}
 
-	Resetting = !ignoreReset && ((gplev0 & PIGPIO_MASK_IN_RESET) == (invertIECInputs ? PIGPIO_MASK_IN_RESET : 0));
+	sampledDataSetToOut = DataSetToOut;
+	sampledAtnaDataSetToOut = AtnaDataSetToOut;
+	sampledClockSetToOut = ClockSetToOut;
 }
 
 void IEC_Bus::PortB_OnPortOut(void* pUserData, unsigned char status)

@@ -469,6 +469,7 @@ public:
 	static void ReadBrowseMode(void);
 	static void ReadGPIOUserInput(void);
 	static void ReadEmulationModeCMDHD(void);
+	static void ReadBusInputsCMDHD(void);
 
 	static void WaitUntilReset(void)
 	{
@@ -571,23 +572,12 @@ public:
 		RefreshAtnOut();
 	}
 
-	// Sample only DATA and CLOCK from the physical pins right now, skipping
-	// ATN, SRQ, reset and buttons. This is called - event-driven - right
-	// before the CPU's read of U10 ORB is resolved (see PiCMDHD::Read), in
-	// addition to the once-per-loop ReadEmulationModeCMDHD() below, so a
-	// transition that happened on the wire during the current emulated cycle
-	// is visible to that same read instead of only showing up on the next
-	// periodic sample. ATN is deliberately left alone here: its CA1
-	// edge/ATNA-gate handling must stay on the periodic path only, or it can
-	// double-fire - a full periodic-style refresh on every half-cycle was
-	// tried first and broke BASIC LOAD for exactly that reason.
-	//
-	// The cost is that a single LDA ORB can now mix ages: pb0/pb2 come from
-	// this sample while pb7 (ATN in) still holds whatever the last periodic
-	// read saw, up to ~1us earlier. Real hardware takes all three off one pin
-	// snapshot. Testing across GEOS 2.0, GDOS64 and WHEELS has not shown this
-	// biting, but it is the first thing to suspect if an ATN handshake ever
-	// desyncs here.
+	// Legacy port-read sampler, used only when both input-sampling switches
+	// are zero. It uses live output flags and also updates PI_Data/PI_Clock.
+	// The experimental port-read variant instead calls ReadBusInputsCMDHD:
+	// snapshot guards allow released lines to settle, and only the VIA port
+	// inputs change. PI_Data and PI_SRQ must remain a coherent pair from the
+	// full sample for the fast-serial shift register.
 	static inline void SampleIECInsNow(void)
 	{
 		if (!port)
@@ -700,13 +690,27 @@ public:
 
 	///////////////////////////////////////////////////////////////////////////////////////////////
 	// Fast Serial
-	static inline void SetFastSerialData(bool value)
+	static inline void SetFastSerialOutputs(bool data, bool srq)
 	{
-		DataSetToOut = value;
-	}
-	static inline void SetFastSerialSRQ(bool value)
-	{
-		SRQSetToOut = value;
+#if PICMD_FAST_SERIAL_PUSH
+		// Compare the shared flags: a slow-port write during Step() may have
+		// changed DATA since the previous fast-serial update.
+		bool changed = DataSetToOut != data || SRQSetToOut != srq;
+#endif
+		DataSetToOut = data;
+		SRQSetToOut = srq;
+#if PICMD_FAST_SERIAL_PUSH
+		if (changed)
+		{
+			// Establish DATA before changing the shift clock. The supported
+			// fast-serial output wiring is split IEC; non-split SRQ remains
+			// unsupported, as in the periodic output path.
+			RefreshIECOutsNow();
+			if (splitIECLines)
+				write32((srq == invertIECOutputs) ? ARM_GPIO_GPSET0 : ARM_GPIO_GPCLR0,
+					1u << PIGPIO_OUT_SRQ);
+		}
+#endif
 	}
 
 
@@ -836,6 +840,7 @@ private:
 	static bool VIA_Data;
 	static bool VIA_Clock;
 
+	static bool sampledDataSetToOut, sampledAtnaDataSetToOut, sampledClockSetToOut;
 	static bool DataSetToOut;
 	static bool AtnaDataSetToOut;
 	static bool ClockSetToOut;

@@ -89,8 +89,14 @@ A Pi 3B or 3B+ is recommended; see [Notes and limitations](#notes-and-limitation
 
 ## Using it
 
-- Select the DHD image in the file browser, or mount it at power up with
-  `AutoMountImage = HD0.dhd` in options.txt.
+- At power up, mount `AutoMountImage = HD0.dhd` from `options.txt` directly,
+  without showing the file browser. The filename must match an image in
+  `/cmd-images` (case insensitive, including its extension). With the option omitted, mount the
+  first `.dhd` or `.img` alphabetically in that folder. A missing configured
+  image does not silently select a different disk.
+- The display shows `Mounting` during image loading. The browser is used when
+  no image is available, mounting fails, or you explicitly eject. The boot ROM
+  filename is no longer displayed over the browser or mounted-image status.
 - The drive then boots the real boot ROM which loads HDOS from the image -
   just like a real CMD HD spinning up. Give it a few seconds.
 - The drive's device number comes from the image itself, the way a real CMD HD
@@ -214,8 +220,15 @@ quick from then on.
 // Only works once the image HAS a stored number - see "Device numbers" below.
 //CMDHDDeviceID = 0
 
-// Size in MB of the RAM cache in front of the DHD image (default 32)
-//CMDHDCacheMB = 32
+// Size in MB of the RAM cache in front of the DHD image (default 24)
+//CMDHDCacheMB = 24
+
+// MB to preload and pin at mount (default 18; 0 disables).
+// Capped at three quarters of the allocated cache; the rest serves other data.
+//CMDHDPreloadMB = 18
+
+// Optional report in FatFS current directory after eject (default off).
+//CMDHDEjectLog = 0
 
 // GPIO used to pull the IEC ATN line low (0 = off, 24 on a Pi1541io).
 // Needed only so the SWAP buttons can reprogram another drive - see
@@ -484,3 +497,84 @@ GPL v3, like Pi1541 - see [LICENSE](LICENSE), and
 
 The CMD HD boot ROM is **not** included and is not covered by that licence.
 Supply your own dump - see "What you need on the SD card" above.
+
+### Development: IEC timing and cache integration
+
+The `dev/iec-cache-integration` branch ports PR #19 selectively onto current
+main. Immediate DATA/CLOCK/ATN output, timestamp-based button debounce, SCSI
+error propagation, reset flush deadlines, and physical-media VERIFY survive.
+The VIA tests also exposed two fixes kept here: initialize the IRQ pointer and
+release the connected IRQ line on reset even after IFR has been cleared.
+
+The cache defaults to 24 MB and falls back to smaller allocations below the
+exception-vector page. Preloading defaults to 18 MB and pins only the primary
+image; companions use the remaining cache. Idle flushing performs at most one
+chunk or one metadata sync per visit across all images. A chunk may require up
+to four writes; an in-progress card operation cannot be interrupted. Reset
+retains its time budget and eject forces a flush. Eject before power-off.
+
+Eject reporting is **off by default**. Set `CMDHDEjectLog = 1` in `options.txt`
+to write `PICMD-EJECT.LOG` in **FatFS's current working directory** after all
+images detach. It replaces the previous report. It records discarded sectors
+and write errors during detach; zero discarded sectors does not rule out
+metadata/close errors. A failing or read-only card may also refuse the report.
+`ScsiImage::UnflushedSectors()` and `WriteErrorCount()` remain available in RAM
+with logging off, and write errors still feed the drive's status/display.
+
+Hardware comparison switches live in `src/picmd_switches.h`. Use a clean build
+for each configuration; compare one change at a time with the same workload,
+card and starting image. Host checks cannot establish physical IEC timing.
+
+The [2026-09-25 hardware report](bench-results/README.md) records successful
+DOS/Wheels file operations, an eject/restart persistence check, and legacy/fast
+SD polling runs with zero reported detach errors or wait timeouts. Fast polling
+reduced the observed mean wait from 512 us to 80 us; different wait counts mean
+this is not an overall file-copy benchmark. The default configuration is being
+submitted for review. The optional port-read sampler and fast-output push remain
+disabled and have not been validated by a hardware A/B comparison.
+
+| Switch | Default | Meaning |
+| --- | --- | --- |
+| `PICMD_EMMC_FAST_POLL` | 1 | Poll without the old millisecond sleeps; 0 restores the old wait algorithm. |
+| `PICMD_EMMC_WAIT_DIAGNOSTICS` | 0 | Count waits, total/max elapsed microseconds and timeouts in RAM. |
+| `PICMD_SECOND_SAMPLE` | 1 | Snapshot-guarded port-only input sample before the second CPU cycle. |
+| `PICMD_PORT_READ_SAMPLE` | 0 | When 1, replace the mid-cycle sample with the same guarded sample at ORB reads. |
+| `PICMD_FAST_SERIAL_PUSH` | 0 | Experimental DATA-then-SRQ output after each CPU update, on changes. |
+| `PICMD_VIA_IDLE_SKIP` | 1 | Skip timer/shift work while the VIA is idle. |
+
+The following procedure is available for further comparisons; the optional
+experiments are not required to use the tested default configuration.
+
+1. **Measure SD polling first.** Build with wait diagnostics enabled and eject
+   logging opted in. Compare `PICMD_EMMC_FAST_POLL = 0` and `1`, leaving the
+   IEC switches unchanged. The report's `EMMC` line includes the polling mode,
+   calls, total/max microseconds and timeouts. Counters reset after mount/preload
+   and are captured after detach but before opening the report, excluding the
+   report's own writes. Diagnostics add two timer reads per wait; enable them
+   in both builds. Totals include the wait hook's time and are not the entire
+   SD-access time. The old algorithm checked readiness after 1 us and slept
+   about 1 ms only after a failed poll. Its contribution to historical 35 ms
+   access times is a hypothesis, not an established measurement.
+2. **Compare input sampling.** Keep fast-serial pushing off. Compare the default
+   mid-cycle sample with `PICMD_PORT_READ_SAMPLE = 1`, which suppresses the
+   mid-cycle read rather than adding a second one. Both use saved output flags
+   so newly released lines get time to rise. Both update only VIA port inputs:
+   changing `PI_Data` at an ORB read while keeping the older `PI_SRQ` can feed
+   incoherent DATA/clock samples into the fast-serial receiver. Setting both
+   sampling switches to zero restores main's legacy live sampler for comparison.
+3. **Then test fast-serial output.** With the chosen input mode fixed, compare
+   `PICMD_FAST_SERIAL_PUSH = 0` and `1`. Previously, fast DATA/SRQ flags changed
+   twice per loop but reached GPIO only at the periodic refresh. The experiment
+   updates DATA before SRQ on each changed CPU-cycle pair and restores DATA
+   after intervening slow-port writes. SRQ output requires split IEC wiring;
+   non-split fast-serial output remains unsupported. GPIO ordering is tested,
+   but real setup/hold time, receiver behavior and CPU budget need measurement.
+   PB5's buffer-direction disconnect is not modeled: a slow-port DATA write
+   can still briefly reach the wire before the fast update restores it. Watch
+   this transient on the scope if enabling the push makes transfers worse;
+   the restore test does not prove that the transient is harmless.
+
+Exercise BASIC LOAD/SAVE, GEOS/GDOS and WHEELS directory/install workflows,
+fast serial in both directions, front-panel warm reset, and companion images.
+Those broader compatibility checks are not all covered by the recorded runs.
+Keep optional experiments disabled unless validating them on the target hardware.

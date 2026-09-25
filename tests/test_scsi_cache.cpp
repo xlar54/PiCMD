@@ -306,6 +306,124 @@ static void DetachOnADeadCardDoesNotPretend()
 
 // ---------------------------------------------------------------------------
 
+
+static bool AbortIdleFlush() { return true; }
+
+static void IdleFlushSharesBudgetAcrossImages()
+{
+	TEST_CASE("idle flush shares one chunk budget across images and separates sync");
+	FreshImage();
+	FakeFs::CreateFile("companion.s01", IMAGE_SECTORS * SECTOR, 0xAB);
+	ScsiImage a, b;
+	CHECK(a.Attach(IMAGE, false));
+	CHECK(b.Attach("companion.s01", false));
+	std::vector<u8> data = Pattern(0x19);
+	CHECK_EQ(a.WriteSector(0, &data[0]), 0);
+	CHECK_EQ(b.WriteSector(0, &data[0]), 0);
+	unsigned writes = FakeFs::WriteCallCount(), syncs = FakeFs::SyncCallCount();
+	CHECK_EQ(ScsiImage::FlushIdle(AbortIdleFlush), ScsiImage::FLUSH_STOPPED);
+	CHECK_EQ(FakeFs::WriteCallCount(), writes);
+	CHECK_EQ(FakeFs::SyncCallCount(), syncs);
+	CHECK_EQ(ScsiImage::FlushIdle(), ScsiImage::FLUSH_MORE);
+	CHECK_EQ(FakeFs::WriteCallCount() - writes, 1);
+	CHECK_EQ(FakeFs::SyncCallCount(), syncs);
+	CHECK_EQ(ScsiImage::FlushIdle(AbortIdleFlush), ScsiImage::FLUSH_STOPPED);
+	CHECK_EQ(FakeFs::SyncCallCount(), syncs);
+	// Drain with a finite guard: a stuck MORE must fail, not hang the tests.
+	ScsiImage::FlushResult result = ScsiImage::FLUSH_MORE;
+	for (int i = 0; i < 8 && result == ScsiImage::FLUSH_MORE; ++i)
+	{
+		unsigned operations = FakeFs::WriteCallCount() + FakeFs::SyncCallCount();
+		result = ScsiImage::FlushIdle();
+		CHECK(FakeFs::WriteCallCount() + FakeFs::SyncCallCount() - operations <= 1);
+	}
+	CHECK_EQ(result, ScsiImage::FLUSH_DONE);
+	CHECK_EQ(OnCard(0), 0x19);
+	CHECK_EQ(FakeFs::Contents("companion.s01")[0], 0x19);
+	a.Detach(); b.Detach();
+}
+
+static void IdleFlushRetainsFailures()
+{
+	TEST_CASE("idle flush preserves failed writes and metadata for retry");
+	FreshImage(); ScsiImage img; CHECK(img.Attach(IMAGE, false));
+	std::vector<u8> data = Pattern(0x29);
+	CHECK_EQ(img.WriteSector(3, &data[0]), 0);
+	FakeFs::ShortWritesAfter(0, 16);
+	CHECK_EQ(ScsiImage::FlushIdle(), ScsiImage::FLUSH_ERROR);
+	CHECK(img.TakeWriteError());
+	FakeFs::ShortWritesAfter(-1);
+	CHECK_EQ(ScsiImage::FlushIdle(), ScsiImage::FLUSH_MORE);
+	CHECK_EQ(OnCard(3, SECTOR - 1), 0x29);
+	FakeFs::FailSync(true);
+	CHECK_EQ(ScsiImage::FlushIdle(), ScsiImage::FLUSH_ERROR);
+	CHECK(img.TakeWriteError());
+	FakeFs::FailSync(false);
+	unsigned before = FakeFs::SyncCallCount();
+	CHECK_EQ(ScsiImage::FlushIdle(), ScsiImage::FLUSH_MORE);
+	CHECK_EQ(FakeFs::SyncCallCount(), before + 1);
+	CHECK_EQ(ScsiImage::FlushIdle(), ScsiImage::FLUSH_DONE);
+	img.Detach();
+}
+
+static void PreloadPinsDataAndPreservesCompanions()
+{
+	TEST_CASE("preload pins data and keeps companion hash stable on detach");
+	FreshImage(); FakeFs::CreateFile("companion.s01", IMAGE_SECTORS * SECTOR, 0xAB);
+	ScsiImage a,b; CHECK(a.Attach(IMAGE, false));
+	CHECK_EQ(a.PreloadCache(65536), 12); // leaves four hashed slots
+	CHECK(b.Attach("companion.s01", false));
+	std::vector<u8> data = Pattern(0x39), out(SECTOR);
+	CHECK_EQ(a.WriteSector(0, &data[0]), 0);
+	// Thrash the unpinned region; sector zero must remain in RAM.
+	for (u32 chunk = 12; chunk < 30; ++chunk)
+		CHECK_EQ(a.ReadSector(chunk * PER_CHUNK, &out[0]), 0);
+	unsigned reads = FakeFs::ReadCallCount();
+	CHECK_EQ(a.ReadSector(0, &out[0]), 0);
+	CHECK_EQ(out[0], 0x39);
+	CHECK_EQ(FakeFs::ReadCallCount(), reads);
+	CHECK_EQ(b.WriteSector(0, &data[0]), 0);
+	a.Detach();
+	CHECK_EQ(b.ReadSector(0, &out[0]), 0);
+	CHECK_EQ(out[0], 0x39);
+	CHECK_EQ(b.Sync(true), 0);
+	CHECK_EQ(FakeFs::Contents("companion.s01")[0], 0x39);
+	b.Detach();
+	CHECK(a.Attach(IMAGE, false));
+	CHECK_EQ(a.PreloadCache(65536), 12); // reservation released after all eject
+	a.Detach();
+}
+
+static void PreloadRefusesLiveCacheAndRecoversReadErrors()
+{
+	TEST_CASE("preload cannot overwrite live dirty cache; failed preload stays cold");
+	FreshImage(); ScsiImage img; CHECK(img.Attach(IMAGE, false));
+	std::vector<u8> data = Pattern(0x49), out(SECTOR);
+	CHECK_EQ(img.WriteSector(0, &data[0]), 0);
+	CHECK_EQ(img.PreloadCache(65536), 0);
+	CHECK_EQ(img.ReadSector(0, &out[0]), 0); CHECK_EQ(out[0], 0x49);
+	img.Detach(); CHECK(img.Attach(IMAGE, false));
+	FakeFs::FailReadsAfter(0);
+	CHECK_EQ(img.PreloadCache(65536), 0);
+	FakeFs::FailReadsAfter(-1);
+	CHECK_EQ(img.ReadSector(0, &out[0]), 0); CHECK_EQ(out[0], 0x49);
+	img.Detach();
+}
+
+static void DetachCountsLostSectorsAfterRetries()
+{
+	TEST_CASE("detach counts only sectors remaining after retries");
+	FreshImage(); ScsiImage img; CHECK(img.Attach(IMAGE, false));
+	std::vector<u8> data = Pattern(0x59);
+	CHECK_EQ(img.WriteSector(0, &data[0]), 0);
+	CHECK_EQ(img.WriteSector(2, &data[0]), 0);
+	u32 lost = ScsiImage::UnflushedSectors();
+	FakeFs::FailWritesAfter(1); // first discontiguous run reaches the card
+	img.Detach();
+	CHECK_EQ(ScsiImage::UnflushedSectors() - lost, 1);
+	CHECK_EQ(OnCard(0), 0x59); CHECK_EQ(OnCard(2), 0xAB);
+}
+
 void RunScsiCacheTests()
 {
 	// One shot, and small so eviction is reachable: 64KB is 16 chunks.
@@ -319,4 +437,9 @@ void RunScsiCacheTests()
 	UnbudgetedFlushFinishesAndMarksClean();
 	EvictionDoesNotDiscardUnwritableData();
 	DetachOnADeadCardDoesNotPretend();
+	IdleFlushSharesBudgetAcrossImages();
+	IdleFlushRetainsFailures();
+	PreloadPinsDataAndPreservesCompanions();
+	PreloadRefusesLiveCacheAndRecoversReadErrors();
+	DetachCountsLostSectorsAfterRetries();
 }

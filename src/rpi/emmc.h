@@ -20,6 +20,17 @@ struct TSCR			// SD configuration register
 // This is how the emulated equivalent keeps that promise.
 extern void (*EMMCBlockingWaitHook)(void);
 
+#if PICMD_EMMC_WAIT_DIAGNOSTICS
+struct EMMCWaitStats
+{
+	u64 calls, totalMicros;
+	u32 maxMicros, timeouts;
+};
+// Call on the thread owning card I/O, not concurrently with a wait.
+void EMMCResetWaitStats();
+EMMCWaitStats EMMCGetWaitStats();
+#endif
+
 class CEMMCDevice
 {
 public:

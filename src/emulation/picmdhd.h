@@ -43,6 +43,7 @@ public:
 	PiCMDHD();
 
 	void Initialise();
+	void SlowTick(u32 emulatedCycles);
 	void Update();		// One 2MHz CPU cycle worth of house keeping.
 	void Reset();
 
@@ -129,6 +130,8 @@ public:
 	// If nonzero the device number stored in the DHD configuration block is
 	// patched to this unit number on the fly (VICE behaviour). If zero the
 	// image's own device number is respected.
+	void SetEjectLog(bool enabled) { ejectLog = enabled; }
+	void SetPreloadMB(unsigned mb) { preloadMB = mb > 512 ? 512 : mb; }
 	void SetForcedDeviceID(u8 id) { forcedDeviceID = id; }
 
 	// Memory bus (called by the CPU on every cycle).
@@ -176,6 +179,8 @@ private:
 	Interrupt via10IRQ;
 
 	u8 forcedDeviceID;
+	unsigned preloadMB;
+	bool ejectLog;
 	unsigned headPosition;
 
 	// Buttons pressed by the user right now.

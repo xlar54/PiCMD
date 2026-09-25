@@ -2,31 +2,70 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, dev/iec-cache-integration ]
   pull_request:
 
 jobs:
-  # The host tests. These are the ones that can actually fail on logic rather
-  # than on whether something compiles, so they run first and with the
-  # sanitizers on - Linux has libasan, unlike MinGW.
+  # Each profile gets a fresh checkout and sanitizer-enabled host build.
+  # EMMC and the CPU's sampler dispatch are covered by firmware builds below;
+  # the host harness checks VIA/cache logic and the actual GPIO helpers.
   tests:
-    name: Host tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build and run
-        run: make -C tests SANITIZE=1
-
-  # Both targets, because they have broken independently before: the Pi Zero
-  # build has its own conditional code and is not exercised by day to day work
-  # on a Pi 3.
-  firmware:
-    name: Build RASPPI=${{ matrix.rasppi }}
+    name: Host tests (${{ matrix.profile }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        rasppi: [0, 2, 3]
+        include:
+          - profile: default
+            defines: ''
+          - profile: fast-push
+            defines: -DPICMD_FAST_SERIAL_PUSH=1
+          - profile: port-read
+            defines: -DPICMD_PORT_READ_SAMPLE=1
+          - profile: legacy-input
+            defines: -DPICMD_SECOND_SAMPLE=0
+          - profile: idle-skip-off
+            defines: -DPICMD_VIA_IDLE_SKIP=0
+          - profile: combined
+            defines: >-
+              -DPICMD_FAST_SERIAL_PUSH=1 -DPICMD_PORT_READ_SAMPLE=1
+              -DPICMD_VIA_IDLE_SKIP=0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run
+        env:
+          CXX: g++ ${{ matrix.defines }}
+        run: make -C tests -B SANITIZE=1
+
+  # Keep all supported targets, plus Pi 3 profiles that compile each alternate
+  # path: guarded port reads, fast output, legacy input/polling, diagnostics
+  # with either polling algorithm, and VIA idle-skip disabled.
+  firmware:
+    name: Build RASPPI=${{ matrix.rasppi }} (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rasppi: 0
+            profile: default
+            defines: ''
+          - rasppi: 2
+            profile: default
+            defines: ''
+          - rasppi: 3
+            profile: default
+            defines: ''
+          - rasppi: 3
+            profile: experiments
+            defines: >-
+              -DPICMD_PORT_READ_SAMPLE=1 -DPICMD_FAST_SERIAL_PUSH=1
+              -DPICMD_EMMC_WAIT_DIAGNOSTICS=1 -DPICMD_EMMC_FAST_POLL=1
+          - rasppi: 3
+            profile: legacy
+            defines: >-
+              -DPICMD_SECOND_SAMPLE=0 -DPICMD_VIA_IDLE_SKIP=0
+              -DPICMD_EMMC_WAIT_DIAGNOSTICS=1 -DPICMD_EMMC_FAST_POLL=0
     steps:
       - uses: actions/checkout@v4
       - name: Install the ARM toolchain
@@ -35,6 +74,11 @@ jobs:
           sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi \
                                   libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib
       - name: Build
+        # Supply defines through the environment so Makefile.rules can append
+        # its required architecture/include flags; a CPPFLAGS command-line
+        # assignment would override those ordinary makefile assignments.
+        env:
+          CPPFLAGS: ${{ matrix.defines }}
         run: make RASPPI=${{ matrix.rasppi }}
       - name: Check a kernel came out
         run: test -s target/kernel.img
