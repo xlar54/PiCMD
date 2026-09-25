@@ -355,6 +355,7 @@ void PiCMDHD::Initialise()
 	LEDs = 0;
 	forcedDeviceID = 0;
 	preloadMB = 0;
+	ejectLog = false;
 	headPosition = 0;
 	imagesize = 0;
 	baselba = INVALID_BASELBA;
@@ -665,7 +666,7 @@ void PiCMDHD::Eject()
 	// Written only after every image has finished its final flush/close.
 	// Keep the latest eject result; a failing/unwritable card may also refuse
 	// this file, so the in-memory write-error counter remains authoritative.
-	if (hadImage)
+	if (hadImage && ejectLog)
 	{
 		FIL report;
 		if (f_open(&report, "PICMD-EJECT.LOG", FA_CREATE_ALWAYS | FA_WRITE) == FR_OK)

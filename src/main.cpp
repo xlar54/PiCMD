@@ -1497,6 +1497,7 @@ static void CheckOptions()
 	// Options for the CMD HD emulation itself.
 	piCMDHD.SetForcedDeviceID((u8)options.GetCMDHDDeviceID());
 	piCMDHD.SetPreloadMB(options.GetCMDHDPreloadMB());
+	piCMDHD.SetEjectLog(options.GetCMDHDEjectLog() != 0);
 	u32 cacheMB = options.GetCMDHDCacheMB();
 	if (cacheMB > 512) cacheMB = 512;
 	ScsiImage::InitCache(cacheMB * 1024 * 1024);

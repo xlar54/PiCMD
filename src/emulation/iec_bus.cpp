@@ -178,6 +178,7 @@ void IEC_Bus::ReadEmulationModeCMDHD(void)
 {
 	IOPort* portB = 0;
 	gplev0 = read32(ARM_GPIO_GPLEV0);
+	Resetting = !ignoreReset && ((gplev0 & PIGPIO_MASK_IN_RESET) == (invertIECInputs ? PIGPIO_MASK_IN_RESET : 0));
 
 	portB = port;
 	if (!portB || !VIA) return;
@@ -290,7 +291,6 @@ void IEC_Bus::ReadEmulationModeCMDHD(void)
 		PI_SRQ = true;
 	}
 
-	Resetting = !ignoreReset && ((gplev0 & PIGPIO_MASK_IN_RESET) == (invertIECInputs ? PIGPIO_MASK_IN_RESET : 0));
 	sampledDataSetToOut = DataSetToOut;
 	sampledAtnaDataSetToOut = AtnaDataSetToOut;
 	sampledClockSetToOut = ClockSetToOut;

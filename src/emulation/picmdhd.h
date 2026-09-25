@@ -130,6 +130,7 @@ public:
 	// If nonzero the device number stored in the DHD configuration block is
 	// patched to this unit number on the fly (VICE behaviour). If zero the
 	// image's own device number is respected.
+	void SetEjectLog(bool enabled) { ejectLog = enabled; }
 	void SetPreloadMB(unsigned mb) { preloadMB = mb > 512 ? 512 : mb; }
 	void SetForcedDeviceID(u8 id) { forcedDeviceID = id; }
 
@@ -179,6 +180,7 @@ private:
 
 	u8 forcedDeviceID;
 	unsigned preloadMB;
+	bool ejectLog;
 	unsigned headPosition;
 
 	// Buttons pressed by the user right now.

@@ -68,6 +68,9 @@ CMDHDAtnOutGPIO = 24
 // Capped at three quarters of the allocated cache; the rest serves other data.
 //CMDHDPreloadMB = 18
 
+// Optional report in FatFS current directory after eject (default off).
+//CMDHDEjectLog = 0
+
 // Front panel buttons. The real CMD HD has four: SWAP 8, SWAP 9,
 // WRITE PROTECT and RESET. Button 5 exits emulation (not a CMD HD function).
 // Set any to 0 to disable it.

@@ -221,6 +221,9 @@ quick from then on.
 // Capped at three quarters of the allocated cache; the rest serves other data.
 //CMDHDPreloadMB = 18
 
+// Optional report in FatFS current directory after eject (default off).
+//CMDHDEjectLog = 0
+
 // GPIO used to pull the IEC ATN line low (0 = off, 24 on a Pi1541io).
 // Needed only so the SWAP buttons can reprogram another drive - see
 // "Swapping device numbers" below.
@@ -507,7 +510,8 @@ require up to four writes; a card operation already in progress cannot be
 interrupted. Reset retains its existing time budget and eject forces a flush.
 Always eject before removing the card or switching off power.
 
-After all images detach, `PICMD-EJECT.LOG` in the image directory records the
+With `CMDHDEjectLog = 1` (default 0), after all images detach,
+`PICMD-EJECT.LOG` in FatFS's current working directory records the
 latest eject's unwritten-sector count and write errors during detach. A failing
 or read-only card may also prevent writing this report. A zero sector count does
 not rule out metadata/close failures; inspect the write-error count as well.
