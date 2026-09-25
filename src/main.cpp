@@ -870,16 +870,18 @@ EmulatingMode BeginEmulating(FileBrowser* fileBrowser, const char* filenameForIc
 
 	if (imagePath && imagePath[0])
 	{
+		fileBrowser->ShowMountStatus("Mounting", filenameForIcon);
 		bool readOnly = fileBrowser->SelectedDHDReadOnly();
 		if (piCMDHD.Insert(imagePath, readOnly))
 		{
 			fileBrowser->DisplayDHDInfo(imagePath, piCMDHD.imagesize, filenameForIcon);
-			fileBrowser->ShowRomName();
 			return EMULATING_CMDHD;
 		}
 		DEBUG_LOG("Failed to attach %s\r\n", imagePath);
 	}
 	fileBrowser->ClearSelections();
+	fileBrowser->RefeshDisplay();
+	fileBrowser->ShowMountStatus("Mount failed", filenameForIcon, false);
 	inputMappings->WaitForClearButtons();
 	return IEC_COMMANDS;
 }
@@ -912,21 +914,12 @@ static void ServiceIECWhileCardBusy(void)
 void CheckAutoMountImage(EXIT_TYPE reset_reason , FileBrowser* fileBrowser)
 {
 	const char* autoMountImageName = options.GetAutoMountImageName();
-	if (autoMountImageName[0] != 0)
+	// An empty option selects the first image at startup. Eject must remain
+	// in the browser until the user explicitly selects another image.
+	if (reset_reason == EXIT_UNKNOWN || reset_reason == EXIT_AUTOLOAD ||
+		(reset_reason == EXIT_RESET && autoMountImageName[0] != 0))
 	{
-		switch (reset_reason)
-		{
-			case EXIT_UNKNOWN:
-			case EXIT_AUTOLOAD:
-			case EXIT_RESET:
-				fileBrowser->SelectAutoMountImage(autoMountImageName);
-			break;
-			case EXIT_CD:
-			case EXIT_KEYBOARD:
-			break;
-			default:
-			break;
-		}
+		fileBrowser->SelectAutoMountImage(autoMountImageName);
 	}
 }
 
@@ -1203,7 +1196,6 @@ void emulator()
 			fileBrowserSelectedName = 0;
 			fileBrowser->ClearSelections();
 
-			fileBrowser->RefeshDisplay(); // Just redisplay the current folder.
 #if not defined(EXPERIMENTALZERO)
 			core0RefreshingScreen.Release();
 #endif
@@ -1212,9 +1204,18 @@ void emulator()
 #if not defined(EXPERIMENTALZERO)
 			inputMappings->SetKeyboardBrowseLCDScreen(screenLCD && options.KeyboardBrowseLCDScreen());
 #endif
-			fileBrowser->ShowRomName();
-
 			CheckAutoMountImage(exitReason, fileBrowser);
+			bool autoSelected = fileBrowser->SelectionsMade();
+			if (autoSelected)
+			{
+				emulating = BeginEmulating(fileBrowser, fileBrowser->LastSelectionName());
+			}
+			else
+			{
+				fileBrowser->RefeshDisplay();
+				if (exitReason == EXIT_UNKNOWN && options.GetAutoMountImageName()[0])
+					fileBrowser->ShowMountStatus("Image not found", options.GetAutoMountImageName(), false);
+			}
 
 			while (emulating == IEC_COMMANDS)
 			{

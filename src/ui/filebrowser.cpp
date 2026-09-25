@@ -32,6 +32,7 @@ extern "C"
 #include "rpi-gpio.h"
 }
 #include "rpihardware.h"
+#include "startupimage.h"
 
 extern Options options;
 
@@ -522,12 +523,7 @@ FileBrowser::BrowsableList::Entry* FileBrowser::BrowsableList::FindEntry(const c
 
 bool IsDiskImageExtention(const char* name)
 {
-	const char* ext = strrchr(name, '.');
-	if (!ext)
-		return false;
-
-	return (toupper((int)ext[1]) == 'D' && toupper((int)ext[2]) == 'H' && toupper((int)ext[3]) == 'D' && ext[4] == 0)
-		|| (toupper((int)ext[1]) == 'I' && toupper((int)ext[2]) == 'M' && toupper((int)ext[3]) == 'G' && ext[4] == 0);
+	return IsCMDHDImageName(name);
 }
 
 FileBrowser::FileBrowser(InputMappings* inputMappings, const char* romName, bool displayPNGIcons, ScreenBase* screenMain, ScreenBase* screenLCD, float scrollHighlightRate)
@@ -1144,7 +1140,7 @@ void FileBrowser::DisplayDHDInfo(const char* imagePath, u32 sizeInSectors, const
 	RGBA BkColour = RGBA(0, 0, 0, 0xFF);
 
 	screenMain->Clear(BkColour);
-	snprintf(buffer, sizeof(buffer), "CMD HD image");
+	snprintf(buffer, sizeof(buffer), "CMD HD mounted");
 	screenMain->PrintText(false, 0, y, buffer, Colour(VIC2_COLOUR_INDEX_LGREEN), BkColour);
 	y += screenMain->GetFontHeight();
 	snprintf(buffer, sizeof(buffer), "%s", imagePath);
@@ -1159,8 +1155,9 @@ void FileBrowser::DisplayDHDInfo(const char* imagePath, u32 sizeInSectors, const
 		screenLCD->Clear(BkColour);
 		// Belt and braces: callers should always pass a name, but this is the
 		// one place a stray pointer would be walked as a string.
+		screenLCD->PrintText(false, 0, 0, "Mounted", RGBA(0xff, 0xff, 0xff, 0xff), BkColour);
 		if (filenameForIcon)
-			screenLCD->PrintText(false, 0, 0, (char*)filenameForIcon, RGBA(0xff, 0xff, 0xff, 0xff), BkColour);
+			screenLCD->PrintText(false, 0, screenLCD->GetFontHeight(), (char*)filenameForIcon, RGBA(0xff, 0xff, 0xff, 0xff), BkColour);
 		screenLCD->SwapBuffers();
 	}
 }
@@ -1370,52 +1367,45 @@ void FileBrowser::ClearSelections()
 	folder.ClearSelections();
 }
 
-void FileBrowser::ShowRomName()
+void FileBrowser::ShowMountStatus(const char* status, const char* image, bool clearScreen)
 {
-	char buffer[256];
-	u32 textColour = RGBA(0, 0, 0, 0xff);
-	u32 bgColour = RGBA(0xff, 0xff, 0xff, 0xff);
-	u32 x = 0; // 43 * 8
-	u32 y;
-
+	const RGBA background = RGBA(0, 0, 0, 0xff);
+	const RGBA foreground = RGBA(0xff, 0xff, 0xff, 0xff);
+	char label[256];
+	char name[256];
+	snprintf(label, sizeof(label), "%s", status);
+	snprintf(name, sizeof(name), "%s", image);
 #if not defined(EXPERIMENTALZERO)
-	y = screenMain->ScaleY(STATUS_BAR_POSITION_Y) - 20;
-
-	snprintf(buffer, 256, "%s", romName);
-
-	screenMain->PrintText(false, x, y, buffer, textColour, bgColour);
+	if (clearScreen) screenMain->Clear(background);
+	u32 mainY = clearScreen ? 0 : screenMain->ScaleY(STATUS_BAR_POSITION_Y) - 20;
+	screenMain->PrintText(false, 0, mainY, label, foreground, background);
+	if (clearScreen)
+		screenMain->PrintText(false, 0, screenMain->GetFontHeight(), name, foreground, background);
 #endif
 	if (screenLCD)
 	{
-		x = 0;
-		y = 0;
-
-		snprintf(buffer, 256, "%s", romName);
-		screenLCD->PrintText(false, x, y, buffer, textColour, bgColour);
+		if (clearScreen) screenLCD->Clear(background);
+		u32 lcdY = clearScreen ? 0 : screenLCD->Height() - screenLCD->GetFontHeight();
+		screenLCD->PrintText(false, 0, lcdY, label, foreground, background);
+		if (clearScreen)
+			screenLCD->PrintText(false, 0, screenLCD->GetFontHeight(), name, foreground, background);
 		screenLCD->SwapBuffers();
 	}
 }
 
 void FileBrowser::SelectAutoMountImage(const char* image)
 {
-	ChangeToImageFolder();
+	ClearSelections();
+	displayingDevices = false;
+	// Search the image folder, not the card root containing kernel.img.
+	if (ChangeToImageFolder() != FR_OK)
+		return;
 	RefreshFolderEntries();
 
-	FileBrowser::BrowsableList::Entry* current = 0;
-	int index;
-	int maxEntries = folder.entries.size();
-
-	for (index = 0; index < maxEntries; ++index)
+	int index = FindStartupImage(folder.entries, image, AM_DIR);
+	if (index >= 0)
 	{
-		current = &folder.entries[index];
-		if (strcasecmp(current->filImage.fname, image) == 0)
-		{
-			break;
-		}
-	}
-
-	if (index != maxEntries)
-	{
+		FileBrowser::BrowsableList::Entry* current = &folder.entries[index];
 		ClearSelections();
 		caddySelections.entries.push_back(*current);
 		// Has to be set here as well as on the manual path: this makes

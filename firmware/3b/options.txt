@@ -80,14 +80,12 @@ CMDHDAtnOutGPIO = 24
 //CMDHDButtonReset = 4
 //CMDHDButtonExit = 5
 
-// Mount this image at startup, so the drive comes straight up as a hard drive.
-// The file must be in the /cmd-images folder, and this name must match it
-// EXACTLY, extension included - .dhd and .img are both valid but they are not
-// interchangeable here. A name that does not match is not an error: the drive
-// simply never mounts, you are left in the file browser, and because there is
-// no browse mode on this branch nothing answers the serial bus at all. If the
-// computer sees no drive, check this line against the actual filename first.
-AutoMountImage = hd0.dhd
+// Boot directly into this image without showing the file browser.
+// Name a file in /cmd-images, including its .dhd or .img extension.
+// With this option omitted, mount the first image alphabetically in that
+// folder. A missing configured name or failed
+// mount returns to the browser; eject also leaves you in the browser.
+//AutoMountImage = hd0.dhd
 
 // ---------------------------------------------------------------------------
 // I2C OLED / LCD

@@ -89,8 +89,14 @@ A Pi 3B or 3B+ is recommended; see [Notes and limitations](#notes-and-limitation
 
 ## Using it
 
-- Select the DHD image in the file browser, or mount it at power up with
-  `AutoMountImage = HD0.dhd` in options.txt.
+- At power up, mount `AutoMountImage = HD0.dhd` from `options.txt` directly,
+  without showing the file browser. The filename must match an image in
+  `/cmd-images` (case insensitive, including its extension). With the option omitted, mount the
+  first `.dhd` or `.img` alphabetically in that folder. A missing configured
+  image does not silently select a different disk.
+- The display shows `Mounting` during image loading. The browser is used when
+  no image is available, mounting fails, or you explicitly eject. The boot ROM
+  filename is no longer displayed over the browser or mounted-image status.
 - The drive then boots the real boot ROM which loads HDOS from the image -
   just like a real CMD HD spinning up. Give it a few seconds.
 - The drive's device number comes from the image itself, the way a real CMD HD

@@ -36,7 +36,7 @@ endif
 UNDER_TEST = $(SRCDIR)/emulation/scsi.cpp $(SRCDIR)/emulation/m6522.cpp $(SRCDIR)/emulation/iec_bus.cpp $(SRCDIR)/options.cpp
 
 TEST_SRCS  = main.cpp harness.cpp \
-             test_scsi_cache.cpp test_scsi_physical_read.cpp test_m6522.cpp test_iec_bus.cpp test_options.cpp \
+             test_scsi_cache.cpp test_scsi_physical_read.cpp test_m6522.cpp test_iec_bus.cpp test_options.cpp test_startupimage.cpp \
              $(SHIMS)/ff.cpp $(SHIMS)/fakeclock.cpp $(SHIMS)/debug.cpp $(SHIMS)/fakegpio.cpp
 
 TARGET     = run_tests
@@ -47,7 +47,7 @@ all: run
 
 build: $(TARGET)
 
-$(TARGET): $(TEST_SRCS) $(UNDER_TEST)
+$(TARGET): $(TEST_SRCS) $(UNDER_TEST) $(SRCDIR)/ui/startupimage.h
 	@echo "  HOSTCXX $(TARGET)"
 	$(CXX) $(CXXFLAGS) -o $(TARGET) $(TEST_SRCS) $(UNDER_TEST)
 
