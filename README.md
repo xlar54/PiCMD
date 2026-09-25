@@ -525,6 +525,14 @@ Hardware comparison switches live in `src/picmd_switches.h`. Use a clean build
 for each configuration; compare one change at a time with the same workload,
 card and starting image. Host checks cannot establish physical IEC timing.
 
+The [2026-09-25 hardware report](bench-results/README.md) records successful
+DOS/Wheels file operations, an eject/restart persistence check, and legacy/fast
+SD polling runs with zero reported detach errors or wait timeouts. Fast polling
+reduced the observed mean wait from 512 us to 80 us; different wait counts mean
+this is not an overall file-copy benchmark. The default configuration is being
+submitted for review. The optional port-read sampler and fast-output push remain
+disabled and have not been validated by a hardware A/B comparison.
+
 | Switch | Default | Meaning |
 | --- | --- | --- |
 | `PICMD_EMMC_FAST_POLL` | 1 | Poll without the old millisecond sleeps; 0 restores the old wait algorithm. |
@@ -533,6 +541,9 @@ card and starting image. Host checks cannot establish physical IEC timing.
 | `PICMD_PORT_READ_SAMPLE` | 0 | When 1, replace the mid-cycle sample with the same guarded sample at ORB reads. |
 | `PICMD_FAST_SERIAL_PUSH` | 0 | Experimental DATA-then-SRQ output after each CPU update, on changes. |
 | `PICMD_VIA_IDLE_SKIP` | 1 | Skip timer/shift work while the VIA is idle. |
+
+The following procedure is available for further comparisons; the optional
+experiments are not required to use the tested default configuration.
 
 1. **Measure SD polling first.** Build with wait diagnostics enabled and eject
    logging opted in. Compare `PICMD_EMMC_FAST_POLL = 0` and `1`, leaving the
@@ -565,4 +576,5 @@ card and starting image. Host checks cannot establish physical IEC timing.
 
 Exercise BASIC LOAD/SAVE, GEOS/GDOS and WHEELS directory/install workflows,
 fast serial in both directions, front-panel warm reset, and companion images.
-The branch remains for development until these hardware checks pass.
+Those broader compatibility checks are not all covered by the recorded runs.
+Keep optional experiments disabled unless validating them on the target hardware.
