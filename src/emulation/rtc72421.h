@@ -42,7 +42,9 @@ public:
 	RTC72421();
 
 	void Reset();
-
+#if defined (__CIRCLE__)	
+	void SetTime(bool networktime,u8 seconds, u8 minutes, u8 hours, u8 day, u8 month, u8 year, u8 weekday);
+#endif	
 	u8 Read(u8 address);
 	void Write(u8 address, u8 data);
 
