@@ -26,3 +26,4 @@ tests/run_tests.exe
 # The CMD HD boot ROM. Not ours to redistribute - supply your own dump and
 # put it beside these files (and in the root of the SD card).
 cmdhd-bootrom.bin
+make-PiCMD.log
