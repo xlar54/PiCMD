@@ -40,10 +40,14 @@
 #ifndef M65C02_H
 #define M65C02_H
 #include "types.h"
+#if defined(__CIRCLE__)
+#undef BIT
+#endif
 
 typedef u8(*C02DataBusReadFn)(u16 address);
 typedef void(*C02DataBusWriteFn)(u16 address, const u8 value);
 
+#if !defined (__CIRCLE__)
 class Interrupt
 {
 public:
@@ -55,6 +59,9 @@ public:
 private:
 	bool asserted;
 };
+#else
+#include "m6502.h"
+#endif /* !defined (__CIRCLE__) */
 
 //2, 3 or 4 cycles
 #define BRANCH_CONDITION_C02(flag, condition)		\

@@ -23,7 +23,9 @@
 #include <stdlib.h>
 #include "scsi.h"
 #include "debug.h"
+#if !defined (__CIRCLE__)
 #include "rpihardware.h"
+#endif
 
 #define MAXIDS 7
 #define MAXLUNS 8

@@ -19,6 +19,7 @@
 #include "defs.h"
 #include <string.h>
 #include <strings.h>
+#if !defined (__CIRCLE__)
 #include "types.h"
 #include "timer.h"
 #include "stb_image.h"
@@ -36,7 +37,7 @@ extern "C"
 }
 #include "inputmappings.h"
 #include "options.h"
-#include "iec_bus.h"
+#include "emulation/iec_bus.h"
 #include "diskio.h"
 #include "emmc.h"
 #include "picmdhd.h"
@@ -45,10 +46,30 @@ extern "C"
 #include "filebrowser.h"
 #include "screenlcd.h"
 #include "spinlock.h"
-
+#else
+#define CMDHD_SUPPORT
+#include "circle-kernel.h"
+#include "stb_image.h"
+extern "C"
+{
+#include "circle-types.h"	
+#include "rpi-mailbox.h"
+}
+#include "InputMappings.h"
+#include "Options.h"
+#include "emulation/iec_bus.h"
+#include "diskio.h"
+#include "emmc.h"
+#include "emulation/picmdhd.h"
+#include "emulation/scsi.h"
+#include "Screen.h"
+#include "FileBrowser.h"
+#include "ScreenLCD.h"
+#endif /* !defined (__CIRCLE__) */
 #include "logo.h"
 #include "ssd_logo.h"
 
+#if !defined (__CIRCLE__)
 unsigned versionMajor = 1;
 unsigned versionMinor = 24;
 
@@ -86,7 +107,17 @@ u8 LcdLogoFile[LCD_LOGO_MAX_SIZE];
 u8 s_u8Memory[0xc000];
 
 int numberOfUSBMassStorageDevices = 0;
+#endif /* !defined (__CIRCLE__) */
+
 PiCMDHD piCMDHD;
+
+#if defined (__CIRCLE__)
+extern Options options;
+extern InputMappings* inputMappings;
+using namespace CMD; // ensure the proper IEC_Bus is used when building with Circle, which has its own namespace.
+#endif /* defined (__CIRCLE__) */
+
+#if !defined (__CIRCLE__)
 CEMMCDevice	m_EMMC;
 Screen screen;
 ScreenLCD* screenLCD = 0;
@@ -929,6 +960,7 @@ void CheckAutoMountImage(EXIT_TYPE reset_reason , FileBrowser* fileBrowser)
 		}
 	}
 }
+#endif /* !defined (__CIRCLE__) */
 
 // The CMD HD's four front panel buttons are mapped onto the board's buttons
 // while emulating. The defaults are (all remappable in options.txt);-
@@ -962,6 +994,14 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 	u32 quietLoops = 0;
 	u32 flushAfterLoops = FLUSH_IDLE_LOOPS;
 
+#if defined (__CIRCLE__)	
+	IEC_Bus::SetSplitIECLines(options.SplitIECLines());
+	IEC_Bus::SetInvertIECInputs(options.InvertIECInputs());
+	IEC_Bus::SetInvertIECOutputs(options.InvertIECOutputs());
+	IEC_Bus::SetIgnoreReset(options.IgnoreReset());
+	IEC_Bus::SetAtnOutGPIO(options.GetCMDHDAtnOutGPIO());
+#endif
+
 	unsigned buttonSwap8 = options.GetCMDHDButtonSwap8();
 	unsigned buttonSwap9 = options.GetCMDHDButtonSwap9();
 	unsigned buttonWP = options.GetCMDHDButtonWP();
@@ -972,6 +1012,7 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 	bool exitButtonPrev = false;
 
 	inputMappings->directDiskSwapRequest = 0;
+
 	// Force an update on all the buttons now before we start emulation mode.
 	IEC_Bus::ReadBrowseMode();
 
@@ -1100,7 +1141,22 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 		exitEmulation |= inputMappings->KeyboardEscape();
 #endif
 		bool exitDoAutoLoad = inputMappings->AutoLoad();
-
+#if defined(__CIRCLE__)
+extern bool webserver_upload;
+		if (webserver_upload)
+		{
+			DEBUG_LOG("%s: webserver upload done.", __FUNCTION__);
+			webserver_upload = false;
+			exitDoAutoLoad = true;
+		}
+extern char mount_img[256];
+extern int mount_new;
+		if (mount_new)
+		{
+			DEBUG_LOG("%s: mount_img = '%s'", __FUNCTION__, mount_img);
+			exitEmulation = true;
+		}
+#endif		
 		if (exitEmulation || exitDoAutoLoad)
 		{
 			if (exitEmulation)
@@ -1156,7 +1212,7 @@ EXIT_TYPE EmulateCMDHD(FileBrowser* fileBrowser)
 
 	return exitReason;
 }
-
+#if !defined(__CIRCLE__)
 void emulator()
 {
 #if not defined(EXPERIMENTALZERO)
@@ -1877,3 +1933,4 @@ extern "C"
 	}
 }
 
+#endif /* !defined (__CIRCLE__) */

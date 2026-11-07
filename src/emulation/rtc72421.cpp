@@ -21,7 +21,12 @@
 // along with Pi1541. If not, see <http://www.gnu.org/licenses/>.
 
 #include "rtc72421.h"
+#if !defined (__CIRCLE__)
 #include "rpihardware.h"
+#else
+#include "debug.h"
+extern void setPiCMDTime(void);
+#endif
 
 #define LIMIT_9(x) (((x) > 9) ? 9 : (x))
 
@@ -65,6 +70,27 @@ void RTC72421::Reset()
 	microsAccumulated = 0;
 }
 
+#if defined (__CIRCLE__)
+void RTC72421::SetTime(bool networktime, u8 s, u8 m, u8 h, u8 d, u8 mo, u8 y, u8 wday)
+{
+	if (!networktime)
+	{
+		Tick();
+		return;
+	}
+	seconds = s;
+	minutes = m;
+	hours = h;
+	day = d;
+	month = mo;
+	year = y;
+	weekday = wday;
+	hour24 = false;
+	/* DEBUG_LOG("RTC72421: SetTime %02d:%02d:%02d %02d/%02d/%02d weekday=%d\r\n",
+		hours, minutes, seconds, day, month, year, weekday); */
+}
+#endif
+
 void RTC72421::IncrementSecond()
 {
 	if (++seconds < 60) return;
@@ -102,7 +128,11 @@ u8 RTC72421::Read(u8 address)
 {
 	u8 retval = 0;
 
+#if !defined (__CIRCLE__)	// this is done by the network time update
 	Tick();
+#else
+	setPiCMDTime();
+#endif	
 
 	switch (address & 0xf)
 	{
@@ -187,7 +217,11 @@ void RTC72421::Write(u8 address, u8 data)
 {
 	u8 real_data = data & 0xf;
 
+#if !defined (__CIRCLE__)	// this is done by the network time update
 	Tick();
+#else
+	setPiCMDTime();
+#endif
 
 	switch (address & 0xf)
 	{

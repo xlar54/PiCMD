@@ -21,7 +21,9 @@
 // There are a number of inherent undocumented edge cases with regards to Timer 2. 
 // A lot of empirical measurements, in the form of bus captures of a real Commodore 1541 VIA were taken to discover the exact behavior of the timers (especially timer 2 and all its idiosyncrasies).
 // Many comments in this file are taken from statements found in the 6522 data sheets.
-
+#if defined (__CIRCLE__)
+using namespace CMD_6522;
+#endif
 m6522::m6522()
 {
 	Reset();

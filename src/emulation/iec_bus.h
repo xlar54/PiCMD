@@ -24,8 +24,20 @@
 #include "m6522.h"
 
 #include "rpi-gpio.h"
+#if !defined (__CIRCLE__)
 #include "rpihardware.h"
+#endif
 
+#if defined (__CIRCLE__)
+using namespace CMD_6522;
+#if defined(__CIRCLE__)
+extern unsigned out_pr1;
+#else
+const unsigned out_pr1 = 0;
+#endif
+namespace CMD
+{
+#endif /* defined (__CIRCLE__) */	
 
 #define INPUT_BUTTON_DEBOUNCE_THRESHOLD 20000
 #define INPUT_BUTTON_REPEAT_THRESHOLD 460000
@@ -355,6 +367,7 @@ public:
 		}
 	
 #if not defined(EXPERIMENTALZERO)
+#if !defined (__CIRCLE__)
 		// Set up audio.
 		write32(CM_PWMDIV, CM_PASSWORD + 0x2000);
 		write32(CM_PWMCTL, CM_PASSWORD + CM_ENAB + CM_SRC_OSCILLATOR);	// Use Default 100MHz Clock
@@ -362,6 +375,7 @@ public:
 		write32(PWM_RNG1, 0x1B4);	// 8bit 44100Hz Mono
 		write32(PWM_RNG2, 0x1B4);
 		write32(PWM_CTL, PWM_USEF2 + PWM_PWEN2 + PWM_USEF1 + PWM_PWEN1 + PWM_CLRF1);
+#endif
 #endif
 
 		for (index = 0; index < buttonCount; ++index)
@@ -502,13 +516,26 @@ public:
 		if (!splitIECLines)
 		{
 			unsigned outputs = 0;
+#if defined(__CIRCLE__)
+			// same pattern as in V1.25f, easier to add printer
+			static const unsigned outlist[4] = {
+				0,
+				FS_OUTPUT << ((PIGPIO_DATA - 10) * 3),
+				FS_OUTPUT << ((PIGPIO_CLOCK - 10) * 3),
+				FS_OUTPUT << ((PIGPIO_DATA - 10) * 3) |
+					FS_OUTPUT << ((PIGPIO_CLOCK - 10) * 3)};
+			unsigned sel =
+				AtnaDataSetToOut | DataSetToOut |
+				(ClockSetToOut << 1) | out_pr1;
 
+			write32(ARM_GPIO_GPFSEL1, (myOutsGPFSEL1 & PI_OUTPUT_MASK_GPFSEL1) | outlist[sel]);				
+#else
 			if (AtnaDataSetToOut || DataSetToOut) outputs |= (FS_OUTPUT << ((PIGPIO_DATA - 10) * 3));
 			if (ClockSetToOut) outputs |= (FS_OUTPUT << ((PIGPIO_CLOCK - 10) * 3));
 
 			unsigned nValue = (myOutsGPFSEL1 & PI_OUTPUT_MASK_GPFSEL1) | outputs;
 			write32(ARM_GPIO_GPFSEL1, nValue);
-
+#endif
 			// A single GPFSEL1 write changes both lines at once, so the
 			// ordering problem handled below cannot arise here. ATN out still
 			// has to be refreshed though - it lives in a different GPFSEL
@@ -526,12 +553,19 @@ public:
 		// terms is what keeps this correct for both.
 		unsigned assertBits = 0;
 		unsigned releaseBits = 0;
+#if defined(__CIRCLE__)
+		if (AtnaDataSetToOut || DataSetToOut || (out_pr1 & 0x01)) assertBits |= 1 << PIGPIO_OUT_DATA;
+		else releaseBits |= 1 << PIGPIO_OUT_DATA;
 
+		if (ClockSetToOut || (out_pr1 & 0x02)) assertBits |= 1 << PIGPIO_OUT_CLOCK;
+		else releaseBits |= 1 << PIGPIO_OUT_CLOCK;
+#else
 		if (AtnaDataSetToOut || DataSetToOut) assertBits |= 1 << PIGPIO_OUT_DATA;
 		else releaseBits |= 1 << PIGPIO_OUT_DATA;
 
 		if (ClockSetToOut) assertBits |= 1 << PIGPIO_OUT_CLOCK;
 		else releaseBits |= 1 << PIGPIO_OUT_CLOCK;
+#endif
 
 		// GPSET0/GPCLR0 are two separate register writes, not one atomic
 		// change. If this call moves one line from released to asserted and
@@ -649,7 +683,7 @@ public:
 
 		write32(ARM_GPIO_GPSET0, set);
 		write32(ARM_GPIO_GPCLR0, clear);
-
+		
 		// ATN out is handled by RefreshIECOutsNow above, on both wirings.
 	}
 
@@ -859,4 +893,8 @@ private:
 	static u32 pressStartTime[5];
 
 };
+#if defined (__CIRCLE__)
+} /* namespace CMD */
 #endif
+
+#endif /* IEC_BUS_H */

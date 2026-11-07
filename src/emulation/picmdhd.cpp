@@ -23,6 +23,9 @@
 #include "picmdhd.h"
 #include "iec_bus.h"
 #include "debug.h"
+#if defined (__CIRCLE__)
+using namespace CMD;
+#endif
 
 extern PiCMDHD piCMDHD;
 
@@ -455,6 +458,13 @@ void PiCMDHD::SetSwap9Button(bool pressed)
 		UpdateButtonInputs();
 	}
 }
+#if defined (__CIRCLE__)
+// specific interface to enable Pi1541 distinguish IEC_Bus classes (for now)
+bool PiCMDHD::GetPI_Atn(void) { return IEC_Bus::GetPI_Atn(); }
+bool PiCMDHD::GetPI_Data(void) { return IEC_Bus::GetPI_Data(); }
+bool PiCMDHD::GetPI_Clock(void) { return IEC_Bus::GetPI_Clock(); }
+bool PiCMDHD::GetPI_SRQ(void) { return IEC_Bus::GetPI_SRQ(); }
+#endif
 
 void PiCMDHD::Reset()
 {

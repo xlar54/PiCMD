@@ -18,9 +18,17 @@
 
 #ifndef M6522_H
 #define M6522_H
-
+#if !defined (__CIRCLE__)
 #include "ioport.h"
+#else
+#include "IOPort.h"
+#endif
 #include "m65c02.h"
+
+#if defined (__CIRCLE__)
+namespace CMD_6522
+{
+#endif /* defined (__CIRCLE__) */
 
 class m6522
 {
@@ -387,5 +395,7 @@ private:
 	unsigned char cb2Shift;  // version of cb2 controlled by the shift register
 	bool cb1OutputShiftClockPositiveEdge;
 };
-
+#if defined (__CIRCLE__)
+} // namespace CMD_6522
+#endif /* defined (__CIRCLE__) */
 #endif

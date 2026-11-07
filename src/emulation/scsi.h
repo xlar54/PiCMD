@@ -23,7 +23,9 @@
 #define SCSI_H
 
 #include "types.h"
+#if !defined (__CIRCLE__)
 #include "ff.h"
+#endif /* !defined (__CIRCLE__) */
 
 struct scsi_context_s;
 

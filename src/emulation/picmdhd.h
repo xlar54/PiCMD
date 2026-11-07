@@ -36,6 +36,13 @@
 #include "i8255a.h"
 #include "rtc72421.h"
 #include "scsi.h"
+#if defined (__CIRCLE__)
+#if !defined (PI1541BUILD)
+#include "iec_bus.h"
+using namespace CMD_6522;
+using namespace CMD;
+#endif
+#endif
 
 class PiCMDHD
 {
@@ -122,6 +129,14 @@ public:
 	bool IsGeosLEDOn() const { return (LEDs & 0x40) == 0; }
 	bool IsWriteProtectLEDOn() const { return (LEDs & 0x80) == 0; }
 	// bit 5 of the latch is not an indicator; it write enables RAM above $8000.
+
+#if defined (__CIRCLE__)	
+	// specific interface to enable Pi1541 distinguish IEC_Bus classes (for now)
+	bool GetPI_Atn(void);
+	bool GetPI_Data(void);
+	bool GetPI_Clock(void);
+	bool GetPI_SRQ(void);
+#endif
 
 	// Rough head position for the display, 0-199 like VICE's track indicator.
 	unsigned GetHeadPosition() const { return headPosition; }

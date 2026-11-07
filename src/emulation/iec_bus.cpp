@@ -17,7 +17,13 @@
 // along with Pi1541. If not, see <http://www.gnu.org/licenses/>.
 
 #include "iec_bus.h"
+#if !defined (__CIRCLE__)
 #include "inputmappings.h"
+#else
+#include "InputMappings.h"
+using namespace CMD;
+#endif /*
+*/
 
 //#define REAL_XOR 1
 
@@ -139,7 +145,7 @@ void IEC_Bus::ReadEmulationModeCMDHD(void)
 	bool AtnaDataSetToOutOld = AtnaDataSetToOut;
 	IOPort* portB = 0;
 	gplev0 = read32(ARM_GPIO_GPLEV0);
-
+	//DEBUG_LOG("%s: - gplev0 = %04x\n", __FUNCTION__, gplev0);
 	portB = port;
 
 #ifndef REAL_XOR
